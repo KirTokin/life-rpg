@@ -12,7 +12,16 @@
         <p>Уровень: <span id="level">1</span></p>
         <div class="bar"><div class="bar-fill" id="xp-fill"></div></div>
         <p><span id="xp">0</span> / <span id="xp-next">100</span> XP</p>
-        <button id="quest-btn">Выполнить квест (+30 XP)</button>
+
+        <button data-xp="30">Выполнить квест (+30 XP)</button>
+        <button data-xp="10" class="secondary">Малый квест (+10 XP)</button>
+
+    <div class="tools">
+        <button id="export-btn" class="small">Экспорт</button>
+        <button id="import-btn" class="small">Импорт</button>
+        <button id="reset-btn" class="small danger">Сброс</button>
+    </div>
+    <input type="file" id="import-file" accept=".json" hidden>
     </div>
     <script src="app.js"></script>
 </body>
