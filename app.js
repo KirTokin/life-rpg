@@ -528,11 +528,11 @@ function resetAll() {
 
 // ===== Визуал =====
 function iconImg(src, cls = 'icon') {
-  return `<img class="${cls}" src="${src}" alt="">`;
+  return html`<img class="${cls}" src="${src}" alt="">`;
 }
 
 function goldLabel(amount) {
-  return `${iconImg(ASSETS.gold)} ${amount}`;
+  return html`${iconImg(ASSETS.gold)} ${amount}`;
 }
 
 function avatarTier(level) {
@@ -605,31 +605,66 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, ch => map[ch]);
 }
 
+// Обёртка-маркер: «этот HTML уже безопасен, экранировать не нужно»
+class SafeHtml {
+  constructor(value) {
+    this.value = value;
+  }
+}
+
+// Явная вставка HTML без экранирования. Использовать только для своих, проверенных строк.
+function raw(value) {
+  return new SafeHtml(String(value));
+}
+
+// Шаблон с автоэкранированием
+function html(strings, ...values) {
+  let out = strings[0];
+  values.forEach((v, i) => {
+    out += toSafeString(v) + strings[i + 1];
+  });
+  return new SafeHtml(out);
+}
+
+function toSafeString(v) {
+  if (v instanceof SafeHtml) return v.value;
+  if (Array.isArray(v)) return v.map(toSafeString).join('');
+  if (v === null || v === undefined || v === false) return '';
+  return escapeHtml(v);
+}
+
+// Единственное место в коде, где пишем в innerHTML. Принимает только SafeHtml.
+function setHtml(id, content) {
+  if (!(content instanceof SafeHtml)) {
+    throw new TypeError(`setHtml(${id}): ожидался результат html\`\``);
+  }
+  document.getElementById(id).innerHTML = content.value;
+}
+
 function renderBar(current, max) {
   const pct = max > 0 ? Math.min(current / max * 100, 100) : 0;
-  return `<div class="bar"><div class="bar-fill" style="width: ${pct}%"></div></div>`;
+  return html`<div class="bar"><div class="bar-fill" style="width: ${pct}%"></div></div>`;
 }
 
 function renderLevelBar(entity, curve) {
   const need = xpToNext(entity.level, curve);
-  return `${renderBar(entity.xp, need)}<div class="bar-label">${entity.xp} / ${need} XP</div>`;
+  return html`${renderBar(entity.xp, need)}<div class="bar-label">${entity.xp} / ${need} XP</div>`;
 }
 
 function renderAuth() {
-  const el = document.getElementById('auth');
   if (currentUser) {
-    el.innerHTML = `
+    setHtml('auth', html`
       <div class="sync-bar">
-        <span>${escapeHtml(currentUser.email)} · <span id="sync-status">${escapeHtml(syncStatus)}</span></span>
+        <span>${currentUser.email} · <span id="sync-status">${syncStatus}</span></span>
         <button id="logout-btn">Выйти</button>
-      </div>`;
+      </div>`);
   } else {
-    el.innerHTML = `
+    setHtml('auth', html`
       <form id="login-form" class="login">
         <input type="email" name="email" placeholder="Email" required autocomplete="username">
         <input type="password" name="password" placeholder="Пароль" required autocomplete="current-password">
         <button type="submit">Войти для синхронизации</button>
-      </form>`;
+      </form>`);
   }
 }
 
@@ -642,30 +677,30 @@ function render() {
     ? `background-image: radial-gradient(circle, transparent 35%, rgba(0,0,0,0.75)), url('${ASSETS.background(top.id)}');`
     : '';
 
-  document.getElementById('hero').innerHTML = `
+  setHtml('hero', html`
     <div class="hero-card" style="--frame: ${frame}; ${bg}">
-      <img class="avatar" src="${tier.image}" alt="${escapeHtml(tier.name)}">
+      <img class="avatar" src="${tier.image}" alt="${tier.name}">
     </div>
-    <h1>${escapeHtml(tier.name)} <span class="lvl">· ур. ${view.hero.level}</span></h1>
+    <h1>${tier.name} <span class="lvl">· ур. ${view.hero.level}</span></h1>
     ${renderLevelBar(view.hero, BALANCE.hero)}
     <div class="bar-label">
       Всего опыта: ${view.totalXp} · <span class="gold">${goldLabel(view.gold)}</span>
-      ${top ? ` · Путь: ${escapeHtml(top.name)}` : ''}
-    </div>`;
+      ${top ? ` · Путь: ${top.name}` : ''}
+    </div>`);
 
-  document.getElementById('stats').innerHTML = STATS.map(s => {
+  setHtml('stats', html`${STATS.map(s => {
     const st = view.stats[s.id];
-    return `
+    return html`
       <div class="stat" style="--c: ${s.color}">
         <div class="stat-head"><span>${iconImg(s.icon)} ${s.name}</span><span>Ур. ${st.level}</span></div>
         ${renderLevelBar(st, BALANCE.stat)}
       </div>`;
-  }).join('');
+  })}`);
 
-  document.getElementById('quests').innerHTML = STATS.map(s => {
+  setHtml('quests', html`${STATS.map(s => {
     const items = QUESTS.filter(q => q.stat === s.id).map(q => {
       const left = Math.max(questLeft(q), 0);
-      return `
+      return html`
         <button class="quest" style="--c: ${s.color}" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>
           ${iconImg(q.icon ?? s.icon)}
           <span class="quest-main">${q.name}
@@ -673,27 +708,27 @@ function render() {
           </span>
           <span>+${q.xp}</span>
         </button>`;
-    }).join('');
-    return items ? `<h3>${iconImg(s.icon)} ${s.name}</h3>${items}` : '';
-  }).join('');
+    });
+    return items.length ? html`<h3>${iconImg(s.icon)} ${s.name}</h3>${items}` : '';
+  })}`);
 
-  document.getElementById('shop').innerHTML = REWARDS.map(r => {
+  setHtml('shop', html`${REWARDS.map(r => {
     const left = rewardLeft(r);
     const affordable = view.gold >= r.cost;
     const available = affordable && left > 0;
     let note = affordable ? 'Можно купить' : `Не хватает ${r.cost - view.gold}`;
     if (r.limit) note += ` · осталось ${PERIOD_NAMES[r.limit.period]}: ${Math.max(left, 0)}`;
-    return `
+    return html`
       <button class="quest reward" data-reward="${r.id}" ${available ? '' : 'disabled'}>
         <span class="quest-main">${r.icon} ${r.name}<small>${note}</small></span>
         <span class="gold">${goldLabel(r.cost)}</span>
       </button>`;
-  }).join('');
+  })}`);
 
   const unlockedCount = view.achievements.filter(a => a.unlocked).length;
-  document.getElementById('achievements').innerHTML =
-    `<p class="bar-label">Открыто: ${unlockedCount} / ${view.achievements.length}</p>` +
-    view.achievements.map(a => `
+  setHtml('achievements', html`
+    <p class="bar-label">Открыто: ${unlockedCount} / ${view.achievements.length}</p>
+    ${view.achievements.map(a => html`
       <div class="ach ${a.unlocked ? '' : 'locked'}">
         ${iconImg(a.unlocked ? (a.image ?? ASSETS.trophy) : ASSETS.lock, 'ach-icon')}
         <div class="ach-body">
@@ -701,7 +736,7 @@ function render() {
           <small>${a.desc} · ${a.current} / ${a.target}</small>
           ${a.unlocked ? '' : renderBar(a.current, a.target)}
         </div>
-      </div>`).join('');
+      </div>`)}`);
 }
 
 let messageTimer;
