@@ -1,18 +1,31 @@
-// ===== Конфиг: статы, квесты, баланс =====
+// ===== Конфиг: статы =====
 const STATS = [
   { id: 'strength',   name: 'Сила',         icon: '💪' },
-  { id: 'intellect',  name: 'Интеллект',    icon: '📚' },
   { id: 'endurance',  name: 'Выносливость', icon: '🏃' },
+  { id: 'intellect',  name: 'Интеллект',    icon: '📚' },
+  { id: 'charisma',   name: 'Харизма',      icon: '🗣️' },
   { id: 'discipline', name: 'Дисциплина',   icon: '🧘' },
 ];
 
+// limit: сколько раз можно выполнить за период (day — сутки, week — неделя с понедельника)
+// goal: рекомендуемая частота, только для отображения
 const QUESTS = [
-  { id: 'pushups', name: '50 отжиманий',      stat: 'strength',   xp: 30 },
-  { id: 'gym',     name: 'Тренировка в зале', stat: 'strength',   xp: 60 },
-  { id: 'read30',  name: 'Чтение 30 минут',   stat: 'intellect',  xp: 30 },
-  { id: 'course',  name: 'Урок курса',        stat: 'intellect',  xp: 50 },
-  { id: 'run5k',   name: 'Пробежка 5 км',     stat: 'endurance',  xp: 50 },
-  { id: 'wakeup',  name: 'Подъём до 7:00',    stat: 'discipline', xp: 20 },
+  { id: 'gym',       stat: 'strength',   name: 'Силовая тренировка 45+ мин',      xp: 60, limit: { period: 'day',  max: 1 }, goal: '2–3 р/нед' },
+  { id: 'home-str',  stat: 'strength',   name: 'Домашняя силовая 20 мин',         xp: 25, limit: { period: 'day',  max: 1 }, goal: '2 р/нед' },
+  { id: 'cardio',    stat: 'endurance',  name: 'Умеренное кардио 30 мин',         xp: 30, limit: { period: 'day',  max: 1 }, goal: '3 р/нед' },
+  { id: 'cardio-hi', stat: 'endurance',  name: 'Интенсивное кардио 25+ мин',      xp: 35, limit: { period: 'day',  max: 1 }, goal: '2 р/нед' },
+  { id: 'steps',     stat: 'endurance',  name: '8 000+ шагов',                    xp: 10, limit: { period: 'day',  max: 1 }, goal: '5 р/нед' },
+  { id: 'read',      stat: 'intellect',  name: 'Чтение 30 мин',                   xp: 20, limit: { period: 'day',  max: 2 }, goal: '5 р/нед' },
+  { id: 'study',     stat: 'intellect',  name: 'Учёба/курс 45 мин',               xp: 45, limit: { period: 'day',  max: 1 }, goal: '3 р/нед' },
+  { id: 'notes',     stat: 'intellect',  name: 'Конспект прочитанного',           xp: 10, limit: { period: 'day',  max: 1 }, goal: '3 р/нед' },
+  { id: 'contact',   stat: 'charisma',   name: 'Звонок/встреча с близким',        xp: 20, limit: { period: 'day',  max: 1 }, goal: '4 р/нед' },
+  { id: 'speech',    stat: 'charisma',   name: 'Практика речи 15 мин (видео)',    xp: 20, limit: { period: 'day',  max: 1 }, goal: '3 р/нед' },
+  { id: 'network',   stat: 'charisma',   name: 'Новое знакомство/нетворкинг',     xp: 45, limit: { period: 'week', max: 2 }, goal: '1 р/нед' },
+  { id: 'present',   stat: 'charisma',   name: 'Выступление/презентация',         xp: 80, limit: { period: 'week', max: 2 }, goal: 'по возможности' },
+  { id: 'sleep',     stat: 'discipline', name: 'Сон 7+ часов',                    xp: 10, limit: { period: 'day',  max: 1 }, goal: 'ежедневно' },
+  { id: 'wakeup',    stat: 'discipline', name: 'Подъём в запланированное время',  xp: 10, limit: { period: 'day',  max: 1 }, goal: '5 р/нед' },
+  { id: 'no-phone',  stat: 'discipline', name: 'Без соцсетей до обеда',           xp: 10, limit: { period: 'day',  max: 1 }, goal: '5 р/нед' },
+  { id: 'review',    stat: 'discipline', name: 'Недельный обзор и план',          xp: 30, limit: { period: 'week', max: 1 }, goal: '1 р/нед' },
 ];
 
 // Кривые уровней: XP до следующего уровня = base · level^power
@@ -21,17 +34,34 @@ const BALANCE = {
   stat: { base: 50,  power: 1.3 },
 };
 
-// ===== Настройки сохранения =====
-const STORAGE_KEY = 'life-rpg-save';
-const SAVE_VERSION = 2;
+const PERIOD_NAMES = { day: 'сегодня', week: 'на неделе' };
 
-function createDefaultState() {
-  const stats = {};
-  STATS.forEach(s => { stats[s.id] = { level: 1, xp: 0 }; });
-  return { version: SAVE_VERSION, level: 1, xp: 0, totalXp: 0, stats };
+// ===== Проверка конфига при старте =====
+function validateConfig() {
+  const errors = [];
+  const statIds = new Set(STATS.map(s => s.id));
+  const questIds = new Set();
+  QUESTS.forEach(q => {
+    if (questIds.has(q.id)) errors.push(`Повтор id квеста: ${q.id}`);
+    questIds.add(q.id);
+    if (!statIds.has(q.stat)) errors.push(`Квест ${q.id}: неизвестный стат ${q.stat}`);
+    if (!Number.isFinite(q.xp) || q.xp <= 0) errors.push(`Квест ${q.id}: некорректный xp`);
+    if (!q.limit || !PERIOD_NAMES[q.limit.period] || !(q.limit.max >= 1)) {
+      errors.push(`Квест ${q.id}: некорректный limit`);
+    }
+  });
+  errors.forEach(e => console.error('Ошибка конфига:', e));
+}
+validateConfig();
+
+// ===== Сохранение =====
+const STORAGE_KEY = 'life-rpg-save';
+const SAVE_VERSION = 3;
+
+function createDefaultSave() {
+  return { version: SAVE_VERSION, log: [] };
 }
 
-// ===== Хранилище (на этапе 5 заменим только этот блок) =====
 const storage = {
   load() {
     try {
@@ -48,80 +78,130 @@ const storage = {
     } catch (e) {
       console.error('Не удалось сохранить:', e);
     }
+  },
+  archive(data) {
+    try {
+      localStorage.setItem(STORAGE_KEY + '-old', JSON.stringify(data));
+    } catch (e) {
+      console.error('Не удалось заархивировать старое сохранение:', e);
+    }
   }
 };
 
-// ===== Проверка и нормализация данных =====
-function isValidState(data) {
-  return data !== null && typeof data === 'object'
-    && Number.isInteger(data.level) && data.level >= 1
-    && Number.isFinite(data.xp) && data.xp >= 0;
+function isValidEntry(e) {
+  return e !== null && typeof e === 'object'
+    && typeof e.id === 'string' && typeof e.questId === 'string'
+    && typeof e.stat === 'string'
+    && Number.isFinite(e.xp) && e.xp > 0
+    && Number.isFinite(e.ts);
 }
 
-// Приводит любое валидное сохранение (включая старое v1) к текущей структуре
-function normalizeState(data) {
-  const def = createDefaultState();
-  const result = { ...def, ...data, version: SAVE_VERSION, stats: {} };
-  if (!Number.isFinite(result.totalXp) || result.totalXp < 0) result.totalXp = 0;
-
-  STATS.forEach(s => {
-    const st = data.stats?.[s.id];
-    const ok = st && Number.isInteger(st.level) && st.level >= 1
-      && Number.isFinite(st.xp) && st.xp >= 0;
-    result.stats[s.id] = ok ? { level: st.level, xp: st.xp } : { level: 1, xp: 0 };
-  });
-  return result;
+function isValidSave(data) {
+  return data !== null && typeof data === 'object'
+    && data.version === SAVE_VERSION
+    && Array.isArray(data.log) && data.log.every(isValidEntry);
 }
 
 // ===== Загрузка при старте =====
-const saved = storage.load();
-let state = isValidState(saved) ? normalizeState(saved) : createDefaultState();
+const loaded = storage.load();
+if (loaded && !isValidSave(loaded)) {
+  console.warn('Старое или повреждённое сохранение перенесено в', STORAGE_KEY + '-old');
+  storage.archive(loaded);
+}
+let save = isValidSave(loaded) ? loaded : createDefaultSave();
 
-// ===== Логика игры =====
+// ===== Вычисление состояния из журнала =====
 function xpToNext(level, curve) {
   return Math.round(curve.base * Math.pow(level, curve.power));
 }
 
-// Начисляет опыт герою или стату. Возвращает число полученных уровней.
 function gainXp(entity, amount, curve) {
   entity.xp += amount;
-  let gained = 0;
   while (entity.xp >= xpToNext(entity.level, curve)) {
     entity.xp -= xpToNext(entity.level, curve);
     entity.level++;
-    gained++;
   }
-  return gained;
 }
 
+function computeState(log) {
+  const hero = { level: 1, xp: 0 };
+  const stats = {};
+  STATS.forEach(s => { stats[s.id] = { level: 1, xp: 0 }; });
+  let totalXp = 0;
+
+  for (const e of log) {
+    gainXp(hero, e.xp, BALANCE.hero);
+    if (stats[e.stat]) gainXp(stats[e.stat], e.xp, BALANCE.stat);
+    totalXp += e.xp;
+  }
+  return { hero, stats, totalXp };
+}
+
+// ===== Лимиты по периодам =====
+function periodStart(period) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  if (period === 'week') {
+    const dayIndex = (d.getDay() + 6) % 7; // понедельник = 0
+    d.setDate(d.getDate() - dayIndex);
+  }
+  return d.getTime();
+}
+
+function questLeft(quest) {
+  const from = periodStart(quest.limit.period);
+  const done = save.log.filter(e => e.questId === quest.id && e.ts >= from).length;
+  return quest.limit.max - done;
+}
+
+// ===== Действия =====
 function completeQuest(questId) {
   const quest = QUESTS.find(q => q.id === questId);
   if (!quest) {
     console.error('Квест не найден:', questId);
     return;
   }
-  if (!Number.isFinite(quest.xp) || quest.xp <= 0) {
-    console.error('Некорректный XP у квеста:', quest);
-    return;
-  }
-  const statConf = STATS.find(s => s.id === quest.stat);
-  const stat = state.stats[quest.stat];
-  if (!statConf || !stat) {
-    console.error('Стат не найден:', quest.stat);
+  if (questLeft(quest) <= 0) {
+    showMessage(`Лимит исчерпан ${PERIOD_NAMES[quest.limit.period]}`);
+    render();
     return;
   }
 
-  const statUp = gainXp(stat, quest.xp, BALANCE.stat);
-  const heroUp = gainXp(state, quest.xp, BALANCE.hero);
-  state.totalXp += quest.xp;
-
-  storage.save(state);
+  const before = computeState(save.log);
+  save.log.push({
+    id: crypto.randomUUID(),
+    questId: quest.id,
+    stat: quest.stat,
+    xp: quest.xp,
+    ts: Date.now(),
+  });
+  storage.save(save);
+  const after = computeState(save.log);
   render();
 
+  const statConf = STATS.find(s => s.id === quest.stat);
   let msg = `+${quest.xp} XP → ${statConf.name}`;
-  if (statUp) msg += ` · ${statConf.name}: ур. ${stat.level}!`;
-  if (heroUp) msg += ` · 🎉 Уровень героя ${state.level}!`;
+  if (after.stats[quest.stat].level > before.stats[quest.stat].level) {
+    msg += ` · ${statConf.name}: ур. ${after.stats[quest.stat].level}!`;
+  }
+  if (after.hero.level > before.hero.level) {
+    msg += ` · 🎉 Уровень героя ${after.hero.level}!`;
+  }
   showMessage(msg);
+}
+
+function undoLast() {
+  const last = save.log[save.log.length - 1];
+  if (!last) {
+    showMessage('Нечего отменять');
+    return;
+  }
+  const quest = QUESTS.find(q => q.id === last.questId);
+  if (!confirm(`Отменить «${quest ? quest.name : last.questId}»?`)) return;
+  save.log.pop();
+  storage.save(save);
+  render();
+  showMessage('Последнее действие отменено');
 }
 
 // ===== Интерфейс =====
@@ -134,13 +214,15 @@ function renderBar(entity, curve) {
 }
 
 function render() {
+  const view = computeState(save.log);
+
   document.getElementById('hero').innerHTML = `
-    <h1>Герой · Ур. ${state.level}</h1>
-    ${renderBar(state, BALANCE.hero)}
-    <div class="bar-label">Всего опыта: ${state.totalXp}</div>`;
+    <h1>Герой · Ур. ${view.hero.level}</h1>
+    ${renderBar(view.hero, BALANCE.hero)}
+    <div class="bar-label">Всего опыта: ${view.totalXp}</div>`;
 
   document.getElementById('stats').innerHTML = STATS.map(s => {
-    const st = state.stats[s.id];
+    const st = view.stats[s.id];
     return `
       <div class="stat">
         <div class="stat-head"><span>${s.icon} ${s.name}</span><span>Ур. ${st.level}</span></div>
@@ -148,12 +230,18 @@ function render() {
       </div>`;
   }).join('');
 
-  document.getElementById('quests').innerHTML = QUESTS.map(q => {
-    const s = STATS.find(x => x.id === q.stat);
-    return `
-      <button class="quest" data-quest="${q.id}">
-        <span>${s ? s.icon : '❓'} ${q.name}</span><span>+${q.xp} XP</span>
-      </button>`;
+  document.getElementById('quests').innerHTML = STATS.map(s => {
+    const items = QUESTS.filter(q => q.stat === s.id).map(q => {
+      const left = Math.max(questLeft(q), 0);
+      return `
+        <button class="quest" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>
+          <span class="quest-main">${q.name}
+            <small>${q.goal} · осталось ${PERIOD_NAMES[q.limit.period]}: ${left}</small>
+          </span>
+          <span>+${q.xp}</span>
+        </button>`;
+    }).join('');
+    return items ? `<h3>${s.icon} ${s.name}</h3>${items}` : '';
   }).join('');
 }
 
@@ -167,7 +255,7 @@ function showMessage(text) {
 
 // ===== Бэкап =====
 function exportSave() {
-  const json = JSON.stringify(state, null, 2);
+  const json = JSON.stringify(save, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -180,12 +268,12 @@ function exportSave() {
 async function importSave(file) {
   try {
     const data = JSON.parse(await file.text());
-    if (!isValidState(data)) {
-      alert('Файл не похож на сохранение Life RPG');
+    if (!isValidSave(data)) {
+      alert('Файл не похож на сохранение Life RPG (версия 3)');
       return;
     }
-    state = normalizeState(data);
-    storage.save(state);
+    save = data;
+    storage.save(save);
     render();
   } catch (e) {
     alert('Не удалось прочитать файл: ' + e.message);
@@ -193,12 +281,12 @@ async function importSave(file) {
 }
 
 // ===== Обработчики событий =====
-// Один обработчик на весь блок квестов (делегирование)
 document.getElementById('quests').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-quest]');
-  if (btn) completeQuest(btn.dataset.quest);
+  if (btn && !btn.disabled) completeQuest(btn.dataset.quest);
 });
 
+document.getElementById('undo-btn').addEventListener('click', undoLast);
 document.getElementById('export-btn').addEventListener('click', exportSave);
 
 document.getElementById('import-btn').addEventListener('click', () => {
@@ -213,10 +301,15 @@ document.getElementById('import-file').addEventListener('change', (e) => {
 
 document.getElementById('reset-btn').addEventListener('click', () => {
   if (confirm('Сбросить весь прогресс? Это нельзя отменить.')) {
-    state = createDefaultState();
-    storage.save(state);
+    save = createDefaultSave();
+    storage.save(save);
     render();
   }
+});
+
+// Пересчитать лимиты, когда вкладка снова становится активной (например, на следующий день)
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) render();
 });
 
 render();
