@@ -1,0 +1,11 @@
+# Все текстовые файлы — с окончаниями LF везде, включая Windows
+* text=auto eol=lf
+
+# Бинарные файлы — никогда не трогать
+*.woff2 binary
+*.webp  binary
+*.png   binary
+*.jpg   binary
+
+# Сторонние библиотеки — хранить как есть, байт в байт
+assets/vendor/** -text
