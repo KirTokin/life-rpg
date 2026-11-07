@@ -1,42 +1,61 @@
+* { box-sizing: border-box; }
 body {
     background: #1e1e2e;
     color: #f0f0f0;
     font-family: Arial, sans-serif;
     display: flex;
     justify-content: center;
-    padding: 40px 16px;
+    padding: 24px 16px;
+    margin: 0;
 }
 .card {
     background: #2a2a3d;
     border-radius: 12px;
     padding: 24px;
     width: 100%;
-    max-width: 360px;
+    max-width: 420px;
 }
-.bar {
+h1 { margin: 0 0 8px; }
+h2 { font-size: 18px; margin: 24px 0 12px; color: #b0b0d0; }
+.bar { 
     background: #444;
     border-radius: 8px;
-    height: 20px;
+    height: 14px;
     overflow: hidden;
 }
 .bar-fill {
     background: #4caf50;
     height: 100%;
-    width: 0%;
-    transition: width 0.3s;
 }
+.bar-label {
+    font-size: 12px;
+    color: #aaa;
+    margin-top: 4px;
+    text-align: right;
+}
+.stat { margin-bottom: 12px; }
+.stat-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.stat .bar-fill { background: #29b6f6; }
 button {
-    margin-top: 16px;
-    width: 100%;
-    padding: 12px;
-    font-size: 16px;
     border: none;
     border-radius: 8px;
-    background: #7c4dff;
     color: white;
     cursor: pointer;
+    font-size: 15px;
 }
-button.secondary { background: #5c5c80; }
+.quest {
+    display: flex;
+    justify-content: space-between;
+    width: 100%;
+    padding: 12px;
+    margin-bottom: 8px;
+    background: #7c4dff;
+    text-align: left;
+}
+.quest:active { transform: scale(0.98); }
+
+.message { min-height: 20px; color: #ffd54f; font-weight: bold; margin: 8px 0 0; }
+
 .tools {
     display: flex;
     gap: 8px;
@@ -44,7 +63,6 @@ button.secondary { background: #5c5c80; }
 }
 .tools button {
     flex: 1;
-    margin-top: 0;
     padding: 8px;
     font-size: 14px;
     background: #3a3a52;
