@@ -1,30 +1,36 @@
 <!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Life RPG</title>
-    <link rel="stylesheet" href="style.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Life RPG</title>
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="card">
-        <section id="hero"></section>
-        <p id="message" class="message"></p>
+  <div class="card">
+    <section id="hero"></section>
+    <p id="message" class="message"></p>
 
-        <h2>Характеристики</h2>
-        <section id="stats"></section>
+    <h2>Характеристики</h2>
+    <section id="stats"></section>
 
-        <h2>Квесты</h2>
-        <section id="quests"></section>
+    <nav class="tabs">
+      <button class="tab active" data-tab="quests">Квесты</button>
+      <button class="tab" data-tab="shop">Магазин</button>
+      <button class="tab" data-tab="achievements">Ачивки</button>
+    </nav>
+    <section id="quests" class="tab-panel"></section>
+    <section id="shop" class="tab-panel" hidden></section>
+    <section id="achievements" class="tab-panel" hidden></section>
 
-        <div class="tools">
-            <button id="undo-btn">Отменить</button>
-            <button id="export-btn">Экспорт</button>
-            <button id="import-btn">Импорт</button>
-            <button id="reset-btn" class="danger">Сброс</button>
-        </div>
-        <input type="file" id="import-file" accept=".json" hidden>
+    <div class="tools">
+      <button id="undo-btn">Отменить</button>
+      <button id="export-btn">Экспорт</button>
+      <button id="import-btn">Импорт</button>
+      <button id="reset-btn" class="danger">Сброс</button>
     </div>
-    <script src="app.js"></script>
+    <input type="file" id="import-file" accept=".json" hidden>
+  </div>
+  <script src="app.js"></script>
 </body>
 </html>
