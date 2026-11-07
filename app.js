@@ -1,68 +1,9 @@
-// ===== Конфиг: статы =====
-const STATS = [
-  { id: 'strength',   name: 'Сила',         icon: '💪' },
-  { id: 'endurance',  name: 'Выносливость', icon: '🏃' },
-  { id: 'intellect',  name: 'Интеллект',    icon: '📚' },
-  { id: 'charisma',   name: 'Харизма',      icon: '🗣️' },
-  { id: 'discipline', name: 'Дисциплина',   icon: '🧘' },
-];
+// Конфиг игры и подключения — в config.js
 
-// ===== Конфиг: квесты =====
-// limit: сколько раз за период (day — сутки, week — неделя с понедельника)
-const QUESTS = [
-  { id: 'gym',       stat: 'strength',   name: 'Силовая тренировка 45+ мин',      xp: 60, limit: { period: 'day',  max: 1 }, goal: '2–3 р/нед' },
-  { id: 'home-str',  stat: 'strength',   name: 'Домашняя силовая 20 мин',         xp: 25, limit: { period: 'day',  max: 1 }, goal: '2 р/нед' },
-  { id: 'cardio',    stat: 'endurance',  name: 'Умеренное кардио 30 мин',         xp: 30, limit: { period: 'day',  max: 1 }, goal: '3 р/нед' },
-  { id: 'cardio-hi', stat: 'endurance',  name: 'Интенсивное кардио 25+ мин',      xp: 35, limit: { period: 'day',  max: 1 }, goal: '2 р/нед' },
-  { id: 'steps',     stat: 'endurance',  name: '8 000+ шагов',                    xp: 10, limit: { period: 'day',  max: 1 }, goal: '5 р/нед' },
-  { id: 'read',      stat: 'intellect',  name: 'Чтение 30 мин',                   xp: 20, limit: { period: 'day',  max: 2 }, goal: '5 р/нед' },
-  { id: 'study',     stat: 'intellect',  name: 'Учёба/курс 45 мин',               xp: 45, limit: { period: 'day',  max: 1 }, goal: '3 р/нед' },
-  { id: 'notes',     stat: 'intellect',  name: 'Конспект прочитанного',           xp: 10, limit: { period: 'day',  max: 1 }, goal: '3 р/нед' },
-  { id: 'contact',   stat: 'charisma',   name: 'Звонок/встреча с близким',        xp: 20, limit: { period: 'day',  max: 1 }, goal: '4 р/нед' },
-  { id: 'speech',    stat: 'charisma',   name: 'Практика речи 15 мин (видео)',    xp: 20, limit: { period: 'day',  max: 1 }, goal: '3 р/нед' },
-  { id: 'network',   stat: 'charisma',   name: 'Новое знакомство/нетворкинг',     xp: 45, limit: { period: 'week', max: 2 }, goal: '1 р/нед' },
-  { id: 'present',   stat: 'charisma',   name: 'Выступление/презентация',         xp: 80, limit: { period: 'week', max: 2 }, goal: 'по возможности' },
-  { id: 'sleep',     stat: 'discipline', name: 'Сон 7+ часов',                    xp: 10, limit: { period: 'day',  max: 1 }, goal: 'ежедневно' },
-  { id: 'wakeup',    stat: 'discipline', name: 'Подъём в запланированное время',  xp: 10, limit: { period: 'day',  max: 1 }, goal: '5 р/нед' },
-  { id: 'no-phone',  stat: 'discipline', name: 'Без соцсетей до обеда',           xp: 10, limit: { period: 'day',  max: 1 }, goal: '5 р/нед' },
-  { id: 'review',    stat: 'discipline', name: 'Недельный обзор и план',          xp: 30, limit: { period: 'week', max: 1 }, goal: '1 р/нед' },
-];
-
-// ===== Конфиг: награды (цена = 80 🪙 × дни усилий) =====
-// limit необязателен
-const REWARDS = [
-  { id: 'treat',  name: 'Любимая вкусняшка',          icon: '🍰', cost: 50,   limit: { period: 'week', max: 3 } },
-  { id: 'series', name: 'Вечер сериала/игр (2 ч)',    icon: '🎬', cost: 80,   limit: { period: 'week', max: 3 } },
-  { id: 'dinner', name: 'Ужин в ресторане',           icon: '🍽️', cost: 250 },
-  { id: 'game',   name: 'Покупка игры/книги',         icon: '🎮', cost: 1100 },
-  { id: 'big',    name: 'Крупная покупка/поездка',    icon: '✈️', cost: 6000 },
-];
-
-// ===== Конфиг: ачивки =====
-// Типы условий: anyQuestCount, questCount, heroLevel, allStatsLevel, streak, purchaseCount
-const ACHIEVEMENTS = [
-  { id: 'first-quest', icon: '👣', name: 'Первый шаг',          desc: 'Выполнить любой квест',               gold: 20,  condition: { type: 'anyQuestCount', count: 1 } },
-  { id: 'quests-100',  icon: '💯', name: 'Сотня',               desc: 'Выполнить 100 квестов',               gold: 200, condition: { type: 'anyQuestCount', count: 100 } },
-  { id: 'gym-10',      icon: '🏋️', name: 'Завсегдатай зала',    desc: '10 силовых тренировок',               gold: 100, condition: { type: 'questCount', questId: 'gym', count: 10 } },
-  { id: 'read-30',     icon: '📖', name: 'Книжный червь',       desc: '30 сессий чтения',                    gold: 100, condition: { type: 'questCount', questId: 'read', count: 30 } },
-  { id: 'sleep-7',     icon: '😴', name: 'Режим налажен',       desc: 'Сон 7+ часов 7 дней подряд',          gold: 100, condition: { type: 'streak', questId: 'sleep', days: 7 } },
-  { id: 'sleep-30',    icon: '🌙', name: 'Мастер сна',          desc: 'Сон 7+ часов 30 дней подряд',         gold: 300, condition: { type: 'streak', questId: 'sleep', days: 30 } },
-  { id: 'habit-66',    icon: '🔥', name: 'Привычка сформирована', desc: '66 дней подряд хоть один квест',    gold: 500, condition: { type: 'streak', days: 66 } },
-  { id: 'hero-5',      icon: '⭐', name: 'Новичок',             desc: 'Герой 5 уровня',                      gold: 100, condition: { type: 'heroLevel', level: 5 } },
-  { id: 'hero-10',     icon: '🌟', name: 'Ветеран',             desc: 'Герой 10 уровня',                     gold: 300, condition: { type: 'heroLevel', level: 10 } },
-  { id: 'all-stats-5', icon: '⚖️', name: 'Разносторонний',      desc: 'Все характеристики 5 уровня',         gold: 300, condition: { type: 'allStatsLevel', level: 5 } },
-  { id: 'first-buy',   icon: '🎁', name: 'Заслужил',            desc: 'Купить первую награду',               gold: 10,  condition: { type: 'purchaseCount', count: 1 } },
-];
-
-// ===== Баланс =====
-const BALANCE = {
-  hero: { base: 100, power: 1.5 },
-  stat: { base: 50,  power: 1.3 },
-  goldPerXp: 0.5,
-};
-
-const PERIOD_NAMES = { day: 'сегодня', week: 'на неделе' };
-const DAY_MS = 24 * 60 * 60 * 1000;
+// ===== Supabase =====
+const db = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+let currentUser = null;
+let syncStatus = '';
 
 // ===== Проверка конфига при старте =====
 function validateConfig() {
@@ -75,7 +16,7 @@ function validateConfig() {
     if (questIds.has(q.id)) errors.push(`Повтор id квеста: ${q.id}`);
     questIds.add(q.id);
     if (!statIds.has(q.stat)) errors.push(`Квест ${q.id}: неизвестный стат ${q.stat}`);
-    if (!Number.isFinite(q.xp) || q.xp <= 0) errors.push(`Квест ${q.id}: некорректный xp`);
+    if (!Number.isInteger(q.xp) || q.xp <= 0) errors.push(`Квест ${q.id}: xp должен быть целым > 0`);
     if (!isValidLimit(q.limit)) errors.push(`Квест ${q.id}: некорректный limit`);
   });
 
@@ -101,7 +42,7 @@ function validateConfig() {
 }
 validateConfig();
 
-// ===== Сохранение =====
+// ===== Локальное сохранение =====
 const STORAGE_KEY = 'life-rpg-save';
 const SAVE_VERSION = 3;
 
@@ -135,19 +76,24 @@ const storage = {
   }
 };
 
-// Записи без type — квесты (совместимость с журналом занятия 4)
 function entryType(e) {
   return e.type ?? 'quest';
+}
+
+function isActive(e) {
+  return !e.deleted;
 }
 
 function isValidEntry(e) {
   if (e === null || typeof e !== 'object') return false;
   if (typeof e.id !== 'string' || !Number.isFinite(e.ts)) return false;
+  if (e.deleted !== undefined && typeof e.deleted !== 'boolean') return false;
+  if (e.synced !== undefined && typeof e.synced !== 'boolean') return false;
 
   switch (entryType(e)) {
     case 'quest':
       return typeof e.questId === 'string' && typeof e.stat === 'string'
-        && Number.isFinite(e.xp) && e.xp > 0
+        && Number.isInteger(e.xp) && e.xp > 0
         && (e.gold === undefined || (Number.isInteger(e.gold) && e.gold >= 0));
     case 'purchase':
       return typeof e.rewardId === 'string' && Number.isInteger(e.cost) && e.cost > 0;
@@ -162,16 +108,14 @@ function isValidSave(data) {
     && Array.isArray(data.log) && data.log.every(isValidEntry);
 }
 
-// ===== Загрузка при старте =====
 const loaded = storage.load();
 if (loaded && !isValidSave(loaded)) {
   console.warn('Старое или повреждённое сохранение перенесено в', STORAGE_KEY + '-old');
   storage.archive(loaded);
 }
-let save = isValidSave(loaded) ? loaded : createDefaultSave();
+const save = isValidSave(loaded) ? loaded : createDefaultSave();
 
 // ===== Даты =====
-// Локальная дата 'ГГГГ-ММ-ДД' (toISOString дал бы дату по UTC — ошибка до 05:00 по Алматы)
 function dateKey(ts) {
   const d = new Date(ts);
   const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -183,13 +127,12 @@ function periodStart(period) {
   const d = new Date();
   d.setHours(0, 0, 0, 0);
   if (period === 'week') {
-    const dayIndex = (d.getDay() + 6) % 7; // понедельник = 0
+    const dayIndex = (d.getDay() + 6) % 7;
     d.setDate(d.getDate() - dayIndex);
   }
   return d.getTime();
 }
 
-// Самая длинная серия дней подряд, в которые есть хотя бы одна запись
 function longestStreak(entries) {
   const days = [...new Set(entries.map(e => dateKey(e.ts)))].sort();
   let best = 0;
@@ -269,6 +212,7 @@ function computeState(log) {
   const purchases = [];
 
   for (const e of log) {
+    if (!isActive(e)) continue;
     if (entryType(e) === 'quest') {
       gainXp(hero, e.xp, BALANCE.hero);
       if (stats[e.stat]) gainXp(stats[e.stat], e.xp, BALANCE.stat);
@@ -291,10 +235,9 @@ function computeState(log) {
 }
 
 // ===== Лимиты по периодам =====
-// matches — функция, которая решает, подходит ли запись (callback)
 function leftInPeriod(limit, matches) {
   const from = periodStart(limit.period);
-  const done = save.log.filter(e => e.ts >= from && matches(e)).length;
+  const done = save.log.filter(e => e.ts >= from && isActive(e) && matches(e)).length;
   return limit.max - done;
 }
 
@@ -307,9 +250,140 @@ function rewardLeft(reward) {
   return leftInPeriod(reward.limit, e => entryType(e) === 'purchase' && e.rewardId === reward.id);
 }
 
+// ===== Синхронизация =====
+// Локальная запись → строка таблицы log_entries
+function toRow(e) {
+  const type = entryType(e);
+  const row = { id: e.id, type, ts: e.ts, deleted: !!e.deleted };
+  if (type === 'quest') {
+    Object.assign(row, { quest_id: e.questId, stat: e.stat, xp: e.xp, gold: e.gold ?? null });
+  } else {
+    Object.assign(row, { reward_id: e.rewardId, cost: e.cost });
+  }
+  return row;
+}
+
+// Строка таблицы → локальная запись
+function fromRow(r) {
+  const e = { id: r.id, type: r.type, ts: Number(r.ts), deleted: r.deleted };
+  if (r.type === 'quest') {
+    Object.assign(e, { questId: r.quest_id, stat: r.stat, xp: r.xp });
+    if (r.gold !== null) e.gold = r.gold;
+  } else {
+    Object.assign(e, { rewardId: r.reward_id, cost: r.cost });
+  }
+  return e;
+}
+
+// Сливает записи в локальный журнал по id. Удаление побеждает.
+function mergeEntries(entries, fromServer) {
+  const byId = new Map(save.log.map(e => [e.id, e]));
+  let added = 0;
+  let skipped = 0;
+
+  for (const incoming of entries) {
+    if (!isValidEntry(incoming)) {
+      skipped++;
+      continue;
+    }
+    const local = byId.get(incoming.id);
+    if (!local) {
+      const entry = { ...incoming, synced: fromServer };
+      save.log.push(entry);
+      byId.set(entry.id, entry);
+      added++;
+    } else if (incoming.deleted && !local.deleted) {
+      local.deleted = true;
+      if (!fromServer) local.synced = false;
+    }
+  }
+
+  save.log.sort((a, b) => a.ts - b.ts);
+  if (skipped) console.warn(`Пропущено некорректных записей: ${skipped}`);
+  return added;
+}
+
+async function fetchAllRows() {
+  const PAGE = 1000;
+  const all = [];
+  let from = 0;
+  while (true) {
+    const { data, error } = await db.from('log_entries')
+      .select('id, type, quest_id, stat, xp, gold, reward_id, cost, ts, deleted')
+      .order('ts', { ascending: true })
+      .order('id', { ascending: true })
+      .range(from, from + PAGE - 1);
+    if (error) throw error;
+    all.push(...data);
+    if (data.length < PAGE) return all;
+    from += PAGE;
+  }
+}
+
+let syncing = false;
+let syncAgain = false;
+
+async function sync() {
+  if (!currentUser) return;
+  if (syncing) {
+    syncAgain = true; // синхронизация уже идёт — повторим после неё
+    return;
+  }
+  syncing = true;
+  setSyncStatus('⏳ синхронизация…');
+
+  try {
+    // 1. Push: отправить неотправленное
+    const pending = save.log.filter(e => !e.synced);
+    if (pending.length) {
+      // Запоминаем, что именно отправили (защита от гонки, см. разбор)
+      const sentDeleted = new Map(pending.map(e => [e.id, !!e.deleted]));
+
+      const { error: insertError } = await db.from('log_entries')
+        .upsert(pending.map(toRow), { onConflict: 'id', ignoreDuplicates: true });
+      if (insertError) throw insertError;
+
+      const deletedIds = pending.filter(e => e.deleted).map(e => e.id);
+      if (deletedIds.length) {
+        const { error: updateError } = await db.from('log_entries')
+          .update({ deleted: true })
+          .in('id', deletedIds);
+        if (updateError) throw updateError;
+      }
+
+      pending.forEach(e => {
+        if (!!e.deleted === sentDeleted.get(e.id)) e.synced = true;
+      });
+      storage.save(save);
+    }
+
+    // 2. Pull + merge: забрать всё из облака и слить
+    const rows = await fetchAllRows();
+    mergeEntries(rows.map(fromRow), true);
+    storage.save(save);
+    render();
+    setSyncStatus(`✅ ${new Date().toLocaleTimeString().slice(0, 5)}`);
+  } catch (e) {
+    console.error('Ошибка синхронизации:', e);
+    setSyncStatus('⚠️ офлайн, данные сохранены локально');
+  } finally {
+    syncing = false;
+    if (syncAgain) {
+      syncAgain = false;
+      sync();
+    }
+  }
+}
+
+function setSyncStatus(text) {
+  syncStatus = text;
+  const el = document.getElementById('sync-status');
+  if (el) el.textContent = text;
+}
+
 // ===== Действия =====
 function commit(entry, before, baseMessage) {
-  save.log.push(entry);
+  save.log.push({ ...entry, synced: false });
   storage.save(save);
   const after = computeState(save.log);
   render();
@@ -321,6 +395,7 @@ function commit(entry, before, baseMessage) {
     }
   });
   showMessage(msg);
+  sync();
 }
 
 function completeQuest(questId) {
@@ -397,19 +472,40 @@ function describeEntry(e) {
 }
 
 function undoLast() {
-  const last = save.log[save.log.length - 1];
+  const last = [...save.log].reverse().find(isActive);
   if (!last) {
     showMessage('Нечего отменять');
     return;
   }
   if (!confirm(`Отменить ${describeEntry(last)}?`)) return;
-  save.log.pop();
+  last.deleted = true;
+  last.synced = false;
   storage.save(save);
   render();
   showMessage('Последнее действие отменено');
+  sync();
+}
+
+function resetAll() {
+  if (!confirm('Сбросить весь прогресс НА ВСЕХ УСТРОЙСТВАХ? Отменить сброс будет нельзя.')) return;
+  save.log.forEach(e => {
+    if (isActive(e)) {
+      e.deleted = true;
+      e.synced = false;
+    }
+  });
+  storage.save(save);
+  render();
+  showMessage('Прогресс сброшен');
+  sync();
 }
 
 // ===== Интерфейс =====
+function escapeHtml(value) {
+  const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+  return String(value).replace(/[&<>"']/g, ch => map[ch]);
+}
+
 function renderBar(current, max) {
   const pct = max > 0 ? Math.min(current / max * 100, 100) : 0;
   return `<div class="bar"><div class="bar-fill" style="width: ${pct}%"></div></div>`;
@@ -418,6 +514,24 @@ function renderBar(current, max) {
 function renderLevelBar(entity, curve) {
   const need = xpToNext(entity.level, curve);
   return `${renderBar(entity.xp, need)}<div class="bar-label">${entity.xp} / ${need} XP</div>`;
+}
+
+function renderAuth() {
+  const el = document.getElementById('auth');
+  if (currentUser) {
+    el.innerHTML = `
+      <div class="sync-bar">
+        <span>${escapeHtml(currentUser.email)} · <span id="sync-status">${escapeHtml(syncStatus)}</span></span>
+        <button id="logout-btn">Выйти</button>
+      </div>`;
+  } else {
+    el.innerHTML = `
+      <form id="login-form" class="login">
+        <input type="email" name="email" placeholder="Email" required autocomplete="username">
+        <input type="password" name="password" placeholder="Пароль" required autocomplete="current-password">
+        <button type="submit">Войти для синхронизации</button>
+      </form>`;
+  }
 }
 
 function render() {
@@ -505,13 +619,45 @@ async function importSave(file) {
       alert('Файл не похож на сохранение Life RPG (версия 3)');
       return;
     }
-    save = data;
+    const added = mergeEntries(data.log, false);
     storage.save(save);
     render();
+    showMessage(`Импортировано новых записей: ${added}`);
+    sync();
   } catch (e) {
     alert('Не удалось прочитать файл: ' + e.message);
   }
 }
+
+// ===== Авторизация =====
+document.getElementById('auth').addEventListener('submit', async (e) => {
+  e.preventDefault(); // не перезагружать страницу при отправке формы
+  const form = e.target;
+  const button = form.querySelector('button');
+  button.disabled = true;
+  const { error } = await db.auth.signInWithPassword({
+    email: form.email.value.trim(),
+    password: form.password.value,
+  });
+  button.disabled = false;
+  if (error) showMessage('Ошибка входа: ' + error.message);
+});
+
+document.getElementById('auth').addEventListener('click', async (e) => {
+  if (e.target.id !== 'logout-btn') return;
+  if (!confirm('Выйти? Локальные данные останутся на этом устройстве.')) return;
+  await db.auth.signOut();
+});
+
+db.auth.onAuthStateChange((event, session) => {
+  currentUser = session?.user ?? null;
+  if (!currentUser) syncStatus = '';
+  renderAuth();
+  // Вызов sync через setTimeout: внутри этого обработчика нельзя ждать другие запросы Supabase
+  if (currentUser && (event === 'INITIAL_SESSION' || event === 'SIGNED_IN')) {
+    setTimeout(sync, 0);
+  }
+});
 
 // ===== Обработчики событий =====
 document.getElementById('quests').addEventListener('click', (e) => {
@@ -533,6 +679,7 @@ document.querySelector('.tabs').addEventListener('click', (e) => {
 
 document.getElementById('undo-btn').addEventListener('click', undoLast);
 document.getElementById('export-btn').addEventListener('click', exportSave);
+document.getElementById('reset-btn').addEventListener('click', resetAll);
 
 document.getElementById('import-btn').addEventListener('click', () => {
   document.getElementById('import-file').click();
@@ -544,16 +691,14 @@ document.getElementById('import-file').addEventListener('change', (e) => {
   e.target.value = '';
 });
 
-document.getElementById('reset-btn').addEventListener('click', () => {
-  if (confirm('Сбросить весь прогресс? Это нельзя отменить.')) {
-    save = createDefaultSave();
-    storage.save(save);
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
     render();
+    sync();
   }
 });
 
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) render();
-});
+window.addEventListener('online', sync);
 
 render();
+renderAuth();
