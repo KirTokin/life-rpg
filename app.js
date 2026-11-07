@@ -38,6 +38,19 @@ function validateConfig() {
     else if (c.stat && !statIds.has(c.stat)) errors.push(`Ачивка ${a.id}: неизвестный стат ${c.stat}`);
   });
 
+  STATS.forEach(s => {
+    if (!s.icon) errors.push(`Стат ${s.id}: нет icon`);
+    if (!s.color) errors.push(`Стат ${s.id}: нет color`);
+  });
+  if (!AVATAR_TIERS.length || AVATAR_TIERS[0].minLevel !== 1) {
+    errors.push('AVATAR_TIERS: первый облик должен начинаться с уровня 1');
+  }
+  AVATAR_TIERS.forEach((t, i) => {
+    if (i > 0 && t.minLevel <= AVATAR_TIERS[i - 1].minLevel) {
+      errors.push(`AVATAR_TIERS: уровни должны возрастать (${t.name})`);
+    }
+  });
+
   errors.forEach(e => console.error('Ошибка конфига:', e));
 }
 validateConfig();
@@ -389,11 +402,24 @@ function commit(entry, before, baseMessage) {
   render();
 
   let msg = baseMessage(after);
+
+  if (after.hero.level > before.hero.level) {
+    const oldTier = avatarTier(before.hero.level);
+    const newTier = avatarTier(after.hero.level);
+    showEffect(
+      ASSETS.levelUp,
+      `Уровень ${after.hero.level}`,
+      newTier !== oldTier ? `Новый облик: ${newTier.name}` : 'Герой стал сильнее'
+    );
+  }
+
   after.achievements.forEach((a, i) => {
     if (a.unlocked && !before.achievements[i].unlocked) {
       msg += ` · 🏆 ${a.name} (+${a.gold} 🪙)`;
+      showEffect(ASSETS.achievement, a.name, `${a.desc} · +${a.gold} 🪙`);
     }
   });
+
   showMessage(msg);
   sync();
 }
@@ -500,6 +526,79 @@ function resetAll() {
   sync();
 }
 
+// ===== Визуал =====
+function iconImg(src, cls = 'icon') {
+  return `<img class="${cls}" src="${src}" alt="">`;
+}
+
+function goldLabel(amount) {
+  return `${iconImg(ASSETS.gold)} ${amount}`;
+}
+
+function avatarTier(level) {
+  let tier = AVATAR_TIERS[0];
+  for (const t of AVATAR_TIERS) {
+    if (level >= t.minLevel) tier = t;
+  }
+  return tier;
+}
+
+// Самый прокачанный стат: сначала по уровню, при равенстве — по XP. Нет прогресса — null.
+function dominantStat(stats) {
+  let best = null;
+  for (const s of STATS) {
+    const st = stats[s.id];
+    if (st.level === 1 && st.xp === 0) continue;
+    const b = best && stats[best.id];
+    if (!best || st.level > b.level || (st.level === b.level && st.xp > b.xp)) best = s;
+  }
+  return best;
+}
+
+// Битые картинки. Событие error не всплывает, поэтому ловим его на фазе перехвата (третий аргумент true)
+document.addEventListener('error', (e) => {
+  if (e.target.tagName === 'IMG') {
+    console.warn('Не найден файл картинки:', e.target.getAttribute('src'));
+    e.target.classList.add('img-missing');
+  }
+}, true);
+
+// Заранее загружаем эмблемы, чтобы эффект не появлялся с задержкой
+[ASSETS.levelUp, ASSETS.achievement].forEach(src => { new Image().src = src; });
+
+// Очередь эффектов: если за одно действие и level-up, и ачивка — покажутся по очереди
+const fxQueue = [];
+let fxTimer = null;
+
+function showEffect(image, title, subtitle) {
+  fxQueue.push({ image, title, subtitle });
+  if (document.getElementById('fx').hidden) nextEffect();
+}
+
+function nextEffect() {
+  clearTimeout(fxTimer);
+  const fx = document.getElementById('fx');
+  const item = fxQueue.shift();
+  if (!item) {
+    fx.hidden = true;
+    fx.classList.remove('play');
+    return;
+  }
+  const img = document.getElementById('fx-img');
+  img.classList.remove('img-missing');
+  img.src = item.image;
+  document.getElementById('fx-title').textContent = item.title;
+  document.getElementById('fx-sub').textContent = item.subtitle;
+
+  fx.hidden = false;
+  fx.classList.remove('play');
+  void fx.offsetWidth; // принудительный перерасчёт: без него повторная анимация не запустится
+  fx.classList.add('play');
+  fxTimer = setTimeout(nextEffect, 2600);
+}
+
+document.getElementById('fx').addEventListener('click', nextEffect);
+
 // ===== Интерфейс =====
 function escapeHtml(value) {
   const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -536,17 +635,29 @@ function renderAuth() {
 
 function render() {
   const view = computeState(save.log);
+  const tier = avatarTier(view.hero.level);
+  const top = dominantStat(view.stats);
+  const frame = top ? top.color : 'var(--gold)';
+  const bg = top
+    ? `background-image: radial-gradient(circle, transparent 35%, rgba(0,0,0,0.75)), url('${ASSETS.background(top.id)}');`
+    : '';
 
   document.getElementById('hero').innerHTML = `
-    <h1>Герой · Ур. ${view.hero.level}</h1>
+    <div class="hero-card" style="--frame: ${frame}; ${bg}">
+      <img class="avatar" src="${tier.image}" alt="${escapeHtml(tier.name)}">
+    </div>
+    <h1>${escapeHtml(tier.name)} <span class="lvl">· ур. ${view.hero.level}</span></h1>
     ${renderLevelBar(view.hero, BALANCE.hero)}
-    <div class="bar-label">Всего опыта: ${view.totalXp} · <span class="gold">🪙 ${view.gold}</span></div>`;
+    <div class="bar-label">
+      Всего опыта: ${view.totalXp} · <span class="gold">${goldLabel(view.gold)}</span>
+      ${top ? ` · Путь: ${escapeHtml(top.name)}` : ''}
+    </div>`;
 
   document.getElementById('stats').innerHTML = STATS.map(s => {
     const st = view.stats[s.id];
     return `
-      <div class="stat">
-        <div class="stat-head"><span>${s.icon} ${s.name}</span><span>Ур. ${st.level}</span></div>
+      <div class="stat" style="--c: ${s.color}">
+        <div class="stat-head"><span>${iconImg(s.icon)} ${s.name}</span><span>Ур. ${st.level}</span></div>
         ${renderLevelBar(st, BALANCE.stat)}
       </div>`;
   }).join('');
@@ -555,26 +666,27 @@ function render() {
     const items = QUESTS.filter(q => q.stat === s.id).map(q => {
       const left = Math.max(questLeft(q), 0);
       return `
-        <button class="quest" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>
+        <button class="quest" style="--c: ${s.color}" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>
+          ${iconImg(q.icon ?? s.icon)}
           <span class="quest-main">${q.name}
             <small>${q.goal} · осталось ${PERIOD_NAMES[q.limit.period]}: ${left}</small>
           </span>
           <span>+${q.xp}</span>
         </button>`;
     }).join('');
-    return items ? `<h3>${s.icon} ${s.name}</h3>${items}` : '';
+    return items ? `<h3>${iconImg(s.icon)} ${s.name}</h3>${items}` : '';
   }).join('');
 
   document.getElementById('shop').innerHTML = REWARDS.map(r => {
     const left = rewardLeft(r);
     const affordable = view.gold >= r.cost;
     const available = affordable && left > 0;
-    let note = affordable ? 'Можно купить' : `Не хватает ${r.cost - view.gold} 🪙`;
+    let note = affordable ? 'Можно купить' : `Не хватает ${r.cost - view.gold}`;
     if (r.limit) note += ` · осталось ${PERIOD_NAMES[r.limit.period]}: ${Math.max(left, 0)}`;
     return `
       <button class="quest reward" data-reward="${r.id}" ${available ? '' : 'disabled'}>
         <span class="quest-main">${r.icon} ${r.name}<small>${note}</small></span>
-        <span>${r.cost} 🪙</span>
+        <span class="gold">${goldLabel(r.cost)}</span>
       </button>`;
   }).join('');
 
@@ -583,9 +695,9 @@ function render() {
     `<p class="bar-label">Открыто: ${unlockedCount} / ${view.achievements.length}</p>` +
     view.achievements.map(a => `
       <div class="ach ${a.unlocked ? '' : 'locked'}">
-        <span class="ach-icon">${a.unlocked ? a.icon : '🔒'}</span>
+        ${iconImg(a.unlocked ? (a.image ?? ASSETS.trophy) : ASSETS.lock, 'ach-icon')}
         <div class="ach-body">
-          <strong>${a.name}</strong> <span class="gold">+${a.gold} 🪙</span>
+          <strong>${a.name}</strong> <span class="gold">+${goldLabel(a.gold)}</span>
           <small>${a.desc} · ${a.current} / ${a.target}</small>
           ${a.unlocked ? '' : renderBar(a.current, a.target)}
         </div>

@@ -1,11 +1,30 @@
 // ===== Конфиг: статы =====
 const STATS = [
-  { id: 'strength',   name: 'Сила',         icon: '💪' },
-  { id: 'endurance',  name: 'Выносливость', icon: '🏃' },
-  { id: 'intellect',  name: 'Интеллект',    icon: '📚' },
-  { id: 'charisma',   name: 'Харизма',      icon: '🗣️' },
-  { id: 'discipline', name: 'Дисциплина',   icon: '🧘' },
+  { id: 'strength',   name: 'Сила',         icon: 'assets/icons/strength.svg',   color: '#b33a2a' },
+  { id: 'endurance',  name: 'Выносливость', icon: 'assets/icons/endurance.svg',  color: '#5f8f4e' },
+  { id: 'intellect',  name: 'Интеллект',    icon: 'assets/icons/intellect.svg',  color: '#4a78b0' },
+  { id: 'charisma',   name: 'Харизма',      icon: 'assets/icons/charisma.svg',   color: '#b08a3a' },
+  { id: 'discipline', name: 'Дисциплина',   icon: 'assets/icons/discipline.svg', color: '#8a8796' },
 ];
+
+// ===== Визуал =====
+// Облики героя: minLevel по возрастанию, первый — с уровня 1
+const AVATAR_TIERS = [
+  { minLevel: 1,  name: 'Странник',         image: 'assets/avatars/tier-1.webp' },
+  { minLevel: 5,  name: 'Послушник ордена', image: 'assets/avatars/tier-2.webp' },
+  { minLevel: 10, name: 'Рыцарь пепла',     image: 'assets/avatars/tier-3.webp' },
+  { minLevel: 15, name: 'Тёмный чемпион',   image: 'assets/avatars/tier-4.webp' },
+  { minLevel: 20, name: 'Легенда бездны',   image: 'assets/avatars/tier-5.webp' },
+];
+
+const ASSETS = {
+  gold: 'assets/icons/gold.svg',
+  lock: 'assets/icons/lock.svg',
+  trophy: 'assets/icons/trophy.svg',
+  levelUp: 'assets/effects/level-up.webp',
+  achievement: 'assets/effects/achievement.webp',
+  background: statId => `assets/backgrounds/${statId}.webp`,
+};
 
 // ===== Конфиг: квесты =====
 // limit: сколько раз за период (day — сутки, week — неделя с понедельника)
