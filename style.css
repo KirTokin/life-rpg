@@ -1,0 +1,38 @@
+body {
+    background: #1e1e2e;
+    color: #f0f0f0;
+    font-family: Arial, sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 40px 16px;
+}
+.card {
+    background: #2a2a3d;
+    border-radius: 12px;
+    padding: 24px;
+    width: 100%;
+    max-width: 360px;
+}
+.bar {
+    background: #444;
+    border-radius: 8px;
+    height: 20px;
+    overflow: hidden;
+}
+.bar-fill {
+    background: #4caf50;
+    height: 100%;
+    width: 0%;
+    transition: width 0.3s;
+}
+button {
+    margin-top: 16px;
+    width: 100%;
+    padding: 12px;
+    font-size: 16px;
+    border: none;
+    border-radius: 8px;
+    background: #7c4dff;
+    color: white;
+    cursor: pointer;
+}
