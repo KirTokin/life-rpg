@@ -259,3 +259,8 @@ button:hover:not(:disabled) { border-color: var(--gold); }
 @media (prefers-reduced-motion: reduce) {
   .fx.play, .fx.play img { animation: none; }
 }
+
+.pending { color: var(--ember); }
+.login .hint { color: var(--muted); font-size: 12px; text-align: center; }
+
+.backup-hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); text-align: center; }

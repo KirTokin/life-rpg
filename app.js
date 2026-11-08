@@ -392,6 +392,33 @@ function setSyncStatus(text) {
   syncStatus = text;
   const el = document.getElementById('sync-status');
   if (el) el.textContent = text;
+  updatePendingBadge();
+}
+
+// ===== Надёжность локальных данных =====
+async function requestPersistentStorage() {
+  if (!navigator.storage?.persist) return; // браузер не поддерживает
+  try {
+    const already = await navigator.storage.persisted();
+    const granted = already || await navigator.storage.persist();
+    console.info(granted
+      ? 'Хранилище: постоянное, браузер не удалит его сам'
+      : 'Хранилище: обычное, браузер может очистить его при нехватке места');
+  } catch (e) {
+    console.warn('Не удалось запросить постоянное хранилище:', e);
+  }
+}
+requestPersistentStorage();
+
+function pendingCount() {
+  return save.log.filter(e => !e.synced).length;
+}
+
+function updatePendingBadge() {
+  const el = document.getElementById('pending-badge');
+  if (!el) return;
+  const n = pendingCount();
+  el.textContent = n ? ` · не отправлено: ${n}` : '';
 }
 
 // ===== Действия =====
@@ -655,7 +682,7 @@ function renderAuth() {
   if (currentUser) {
     setHtml('auth', html`
       <div class="sync-bar">
-        <span>${currentUser.email} · <span id="sync-status">${syncStatus}</span></span>
+        <span>${currentUser.email} · <span id="sync-status">${syncStatus}</span><span id="pending-badge" class="pending"></span></span>
         <button id="logout-btn">Выйти</button>
       </div>`);
   } else {
@@ -664,8 +691,10 @@ function renderAuth() {
         <input type="email" name="email" placeholder="Email" required autocomplete="username">
         <input type="password" name="password" placeholder="Пароль" required autocomplete="current-password">
         <button type="submit">Войти для синхронизации</button>
+        <small class="hint">Без входа данные хранятся только на этом устройстве</small>
       </form>`);
   }
+  updatePendingBadge();
 }
 
 function render() {
@@ -737,6 +766,8 @@ function render() {
           ${a.unlocked ? '' : renderBar(a.current, a.target)}
         </div>
       </div>`)}`);
+  updatePendingBadge();
+  updateBackupHint();
 }
 
 let messageTimer;
@@ -748,6 +779,8 @@ function showMessage(text) {
 }
 
 // ===== Бэкап =====
+const LAST_EXPORT_KEY = 'life-rpg-last-export';
+
 function exportSave() {
   const json = JSON.stringify(save, null, 2);
   const blob = new Blob([json], { type: 'application/json' });
@@ -757,6 +790,32 @@ function exportSave() {
   a.download = `life-rpg-backup-${dateKey(Date.now())}.json`;
   a.click();
   URL.revokeObjectURL(url);
+
+  try {
+    localStorage.setItem(LAST_EXPORT_KEY, String(Date.now()));
+  } catch (e) {
+    console.warn('Не удалось запомнить дату экспорта:', e);
+  }
+  updateBackupHint();
+}
+
+function updateBackupHint() {
+  const el = document.getElementById('backup-hint');
+  if (!el) return;
+  let last = null;
+  try {
+    last = Number(localStorage.getItem(LAST_EXPORT_KEY)) || null;
+  } catch (e) {
+    // хранилище недоступно — считаем, что экспорта не было
+  }
+  if (!last) {
+    el.textContent = '⚠️ Экспорт ещё не делался на этом устройстве';
+    return;
+  }
+  const days = Math.floor((Date.now() - last) / DAY_MS);
+  el.textContent = days > 7
+    ? `⚠️ Последний экспорт ${days} дн. назад — сделайте бэкап`
+    : `Последний экспорт: ${days === 0 ? 'сегодня' : days + ' дн. назад'}`;
 }
 
 async function importSave(file) {
