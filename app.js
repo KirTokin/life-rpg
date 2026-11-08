@@ -57,10 +57,46 @@ validateConfig();
 
 // ===== Локальное сохранение =====
 const STORAGE_KEY = 'life-rpg-save';
-const SAVE_VERSION = 3;
+const SAVE_VERSION = 4;
+
+// Миграции сохранения. Ключ — версия, ИЗ которой мигрируем.
+// Каждая функция переводит данные ровно на одну версию вперёд.
+// ВАЖНО: старые миграции никогда не редактировать, только добавлять новые.
+const MIGRATIONS = {
+  // v3 → v4: добавлен владелец данных (id аккаунта Supabase)
+  3: (data) => ({ ...data, version: 4, ownerId: null }),
+};
+
+// Прогоняет сохранение через цепочку миграций до текущей версии.
+// Возвращает данные текущей версии или null, если перевести нельзя.
+function migrate(data) {
+  if (data === null || typeof data !== 'object' || !Number.isInteger(data.version)) {
+    return null;
+  }
+  if (data.version > SAVE_VERSION) {
+    console.error(`Сохранение версии ${data.version} новее игры (версия ${SAVE_VERSION}). Обновите страницу.`);
+    return null;
+  }
+  let current = data;
+  while (current.version < SAVE_VERSION) {
+    const step = MIGRATIONS[current.version];
+    if (!step) {
+      console.error(`Нет миграции с версии ${current.version}`);
+      return null;
+    }
+    const next = step(current);
+    if (next.version !== current.version + 1) {
+      console.error(`Миграция с версии ${current.version} вернула версию ${next.version}`);
+      return null;
+    }
+    console.info(`Сохранение обновлено: v${current.version} → v${next.version}`);
+    current = next;
+  }
+  return current;
+}
 
 function createDefaultSave() {
-  return { version: SAVE_VERSION, log: [] };
+  return { version: SAVE_VERSION, ownerId: null, log: [] };
 }
 
 const storage = {
@@ -118,15 +154,26 @@ function isValidEntry(e) {
 function isValidSave(data) {
   return data !== null && typeof data === 'object'
     && data.version === SAVE_VERSION
+    && (data.ownerId === null || typeof data.ownerId === 'string')
     && Array.isArray(data.log) && data.log.every(isValidEntry);
 }
 
 const loaded = storage.load();
-if (loaded && !isValidSave(loaded)) {
-  console.warn('Старое или повреждённое сохранение перенесено в', STORAGE_KEY + '-old');
+const migrated = loaded ? migrate(loaded) : null;
+const loadedOk = migrated !== null && isValidSave(migrated);
+
+if (loaded && !loadedOk) {
+  console.warn('Сохранение не удалось загрузить, оно перенесено в', STORAGE_KEY + '-old');
   storage.archive(loaded);
+  if (Number.isInteger(loaded.version) && loaded.version > SAVE_VERSION) {
+    alert('Сохранение создано более новой версией игры. Обновите страницу (на ПК — Ctrl+F5).');
+  }
 }
-const save = isValidSave(loaded) ? loaded : createDefaultSave();
+
+const save = loadedOk ? migrated : createDefaultSave();
+if (loadedOk && migrated !== loaded) {
+  storage.save(save); // сохраняем результат миграции
+}
 
 // ===== Даты =====
 function dateKey(ts) {
@@ -337,7 +384,7 @@ let syncing = false;
 let syncAgain = false;
 
 async function sync() {
-  if (!currentUser) return;
+  if (!currentUser || save.ownerId !== currentUser.id) return;
   if (syncing) {
     syncAgain = true; // синхронизация уже идёт — повторим после неё
     return;
@@ -820,9 +867,9 @@ function updateBackupHint() {
 
 async function importSave(file) {
   try {
-    const data = JSON.parse(await file.text());
-    if (!isValidSave(data)) {
-      alert('Файл не похож на сохранение Life RPG (версия 3)');
+    const data = migrate(JSON.parse(await file.text()));
+    if (!data || !isValidSave(data)) {
+      alert('Файл не похож на сохранение Life RPG или создан более новой версией игры');
       return;
     }
     const added = mergeEntries(data.log, false);
@@ -855,14 +902,46 @@ document.getElementById('auth').addEventListener('click', async (e) => {
   await db.auth.signOut();
 });
 
+// Проверяет, чьи данные лежат на устройстве. true — можно синхронизировать.
+function checkOwner(user) {
+  if (save.ownerId === user.id) return true;
+
+  if (save.ownerId === null) {
+    // Данные набраны без входа — присваиваем их этому аккаунту
+    save.ownerId = user.id;
+    storage.save(save);
+    return true;
+  }
+
+  const ok = confirm(
+    'Данные на этом устройстве принадлежат другому аккаунту.\n\n' +
+    'OK — убрать их с устройства (копия сохранится в резерв) и загрузить данные текущего аккаунта.\n' +
+    'Отмена — выйти из аккаунта, ничего не меняя.'
+  );
+  if (!ok) return false;
+
+  storage.archive(save);
+  save.log = [];
+  save.ownerId = user.id;
+  storage.save(save);
+  render();
+  return true;
+}
+
 db.auth.onAuthStateChange((event, session) => {
-  currentUser = session?.user ?? null;
+  const user = session?.user ?? null;
+  const isLogin = event === 'INITIAL_SESSION' || event === 'SIGNED_IN';
+
+  if (user && isLogin && !checkOwner(user)) {
+    // Через setTimeout: внутри этого обработчика нельзя ждать другие запросы Supabase
+    setTimeout(() => db.auth.signOut(), 0);
+    return;
+  }
+
+  currentUser = user;
   if (!currentUser) syncStatus = '';
   renderAuth();
-  // Вызов sync через setTimeout: внутри этого обработчика нельзя ждать другие запросы Supabase
-  if (currentUser && (event === 'INITIAL_SESSION' || event === 'SIGNED_IN')) {
-    setTimeout(sync, 0);
-  }
+  if (currentUser && isLogin) setTimeout(sync, 0);
 });
 
 // ===== Обработчики событий =====
