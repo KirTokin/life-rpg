@@ -99,6 +99,7 @@ function createDefaultSave() {
   return { version: SAVE_VERSION, ownerId: null, log: [] };
 }
 
+let saveRevision = 0; // увеличивается при каждом сохранении: признак «журнал изменился»
 const storage = {
   load() {
     try {
@@ -110,6 +111,7 @@ const storage = {
     }
   },
   save(data) {
+    saveRevision++;
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
     } catch (e) {
@@ -294,20 +296,98 @@ function computeState(log) {
   return view;
 }
 
+// ===== Кэш состояния =====
+let stateCache = { revision: -1, view: null };
+
+// Состояние героя с кэшем: пересчёт только если журнал изменился
+function getState() {
+  if (stateCache.revision !== saveRevision) {
+    stateCache = { revision: saveRevision, view: computeState(save.log) };
+  }
+  return stateCache.view;
+}
+
 // ===== Лимиты по периодам =====
-function leftInPeriod(limit, matches) {
-  const from = periodStart(limit.period);
-  const done = save.log.filter(e => e.ts >= from && isActive(e) && matches(e)).length;
-  return limit.max - done;
+let countsCache = { key: null, day: null, week: null };
+
+// Один проход по журналу: сколько раз каждый квест/награда выполнены сегодня и за неделю.
+// Кэш зависит от ревизии журнала И от начала текущих суток/недели (после полуночи — пересчёт).
+function periodCounts() {
+  const dayStart = periodStart('day');
+  const weekStart = periodStart('week');
+  const key = `${saveRevision}|${dayStart}|${weekStart}`;
+  if (countsCache.key === key) return countsCache;
+
+  const day = new Map();
+  const week = new Map();
+  for (const e of save.log) {
+    if (!isActive(e) || e.ts < weekStart) continue; // начало недели всегда не позже начала суток
+    const id = entryType(e) === 'quest' ? `quest:${e.questId}` : `purchase:${e.rewardId}`;
+    if (e.ts >= dayStart) day.set(id, (day.get(id) ?? 0) + 1);
+    week.set(id, (week.get(id) ?? 0) + 1);
+  }
+  countsCache = { key, day, week };
+  return countsCache;
+}
+
+function leftInPeriod(limit, countKey) {
+  const counts = periodCounts()[limit.period];
+  return limit.max - (counts.get(countKey) ?? 0);
 }
 
 function questLeft(quest) {
-  return leftInPeriod(quest.limit, e => entryType(e) === 'quest' && e.questId === quest.id);
+  return leftInPeriod(quest.limit, `quest:${quest.id}`);
 }
 
 function rewardLeft(reward) {
   if (!reward.limit) return Infinity;
-  return leftInPeriod(reward.limit, e => entryType(e) === 'purchase' && e.rewardId === reward.id);
+  return leftInPeriod(reward.limit, `purchase:${reward.id}`);
+}
+
+// ===== Проверка журнала на «потерянные» id =====
+let orphanCache = { revision: -1, text: '' };
+
+function findOrphansText() {
+  if (orphanCache.revision === saveRevision) return orphanCache.text;
+
+  const questIds = new Set(QUESTS.map(q => q.id));
+  const statIds = new Set(STATS.map(s => s.id));
+  const rewardIds = new Set(REWARDS.map(r => r.id));
+  const quests = new Map();
+  const stats = new Map();
+  const rewards = new Map();
+  const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
+
+  for (const e of save.log) {
+    if (!isActive(e)) continue;
+    if (entryType(e) === 'quest') {
+      if (!questIds.has(e.questId)) bump(quests, e.questId);
+      if (!statIds.has(e.stat)) bump(stats, e.stat);
+    } else if (entryType(e) === 'purchase') {
+      if (!rewardIds.has(e.rewardId)) bump(rewards, e.rewardId);
+    }
+  }
+
+  const fmt = (label, map) => map.size
+    ? `${label}: ${[...map].map(([id, n]) => `${id} (записей: ${n})`).join(', ')}`
+    : null;
+  const parts = [fmt('квесты', quests), fmt('статы', stats), fmt('награды', rewards)].filter(Boolean);
+
+  const text = parts.length
+    ? `⚠️ В журнале есть id, которых нет в config.js — ${parts.join('; ')}. ` +
+      'Скорее всего, id изменили или удалили. Верните его в конфиг, чтобы записи снова учитывались полностью.'
+    : '';
+  if (text && text !== orphanCache.text) console.warn(text);
+  orphanCache = { revision: saveRevision, text };
+  return text;
+}
+
+function updateConfigWarning() {
+  const el = document.getElementById('config-warning');
+  if (!el) return;
+  const text = findOrphansText();
+  el.textContent = text;
+  el.hidden = !text;
 }
 
 // ===== Синхронизация =====
@@ -472,7 +552,7 @@ function updatePendingBadge() {
 function commit(entry, before, baseMessage) {
   save.log.push({ ...entry, synced: false });
   storage.save(save);
-  const after = computeState(save.log);
+  const after = getState();
   render();
 
   let msg = baseMessage(after);
@@ -510,7 +590,7 @@ function completeQuest(questId) {
     return;
   }
 
-  const before = computeState(save.log);
+  const before = getState();
   const gold = Math.round(quest.xp * BALANCE.goldPerXp);
   const entry = {
     id: crypto.randomUUID(),
@@ -541,7 +621,7 @@ function buyReward(rewardId) {
     console.error('Награда не найдена:', rewardId);
     return;
   }
-  const before = computeState(save.log);
+  const before = getState();
   if (before.gold < reward.cost) {
     showMessage(`Не хватает ${reward.cost - before.gold} 🪙`);
     return;
@@ -745,7 +825,7 @@ function renderAuth() {
 }
 
 function render() {
-  const view = computeState(save.log);
+  const view = getState();
   const tier = avatarTier(view.hero.level);
   const top = dominantStat(view.stats);
   const frame = top ? top.color : 'var(--gold)';
@@ -815,6 +895,7 @@ function render() {
       </div>`)}`);
   updatePendingBadge();
   updateBackupHint();
+  updateConfigWarning();
 }
 
 let messageTimer;
