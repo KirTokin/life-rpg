@@ -416,9 +416,10 @@ function fromRow(r) {
 }
 
 // Сливает записи в локальный журнал по id. Удаление побеждает.
+// Возвращает массив добавленных записей.
 function mergeEntries(entries, fromServer) {
   const byId = new Map(save.log.map(e => [e.id, e]));
-  let added = 0;
+  const added = [];
   let skipped = 0;
 
   for (const incoming of entries) {
@@ -431,7 +432,7 @@ function mergeEntries(entries, fromServer) {
       const entry = { ...incoming, synced: fromServer };
       save.log.push(entry);
       byId.set(entry.id, entry);
-      added++;
+      added.push(entry);
     } else if (incoming.deleted && !local.deleted) {
       local.deleted = true;
       if (!fromServer) local.synced = false;
@@ -441,6 +442,63 @@ function mergeEntries(entries, fromServer) {
   save.log.sort((a, b) => a.ts - b.ts);
   if (skipped) console.warn(`Пропущено некорректных записей: ${skipped}`);
   return added;
+}
+
+// Лимит для записи: { limit, key } или null, если у записи лимита нет
+function limitFor(e) {
+  if (entryType(e) === 'quest') {
+    const q = QUESTS.find(x => x.id === e.questId);
+    return q ? { limit: q.limit, key: `quest:${q.id}` } : null;
+  }
+  const r = REWARDS.find(x => x.id === e.rewardId);
+  return r?.limit ? { limit: r.limit, key: `purchase:${r.id}` } : null;
+}
+
+// Ключ периода записи: дата дня или дата понедельника её недели
+function bucketOf(e, period) {
+  if (period === 'day') return dateKey(e.ts);
+  const d = new Date(e.ts);
+  d.setHours(0, 0, 0, 0);
+  d.setDate(d.getDate() - (d.getDay() + 6) % 7);
+  return dateKey(d.getTime());
+}
+
+// После слияния отменяет записи сверх лимита в затронутых периодах.
+// Оставляет самые ранние; правило одинаково на всех устройствах.
+// Возвращает число отменённых записей.
+function enforceLimits(addedEntries) {
+  const touched = new Set();
+  for (const e of addedEntries) {
+    if (!isActive(e)) continue;
+    const info = limitFor(e);
+    if (info) touched.add(`${info.key}|${bucketOf(e, info.limit.period)}`);
+  }
+  if (!touched.size) return 0;
+
+  const groups = new Map();
+  for (const e of save.log) {
+    if (!isActive(e)) continue;
+    const info = limitFor(e);
+    if (!info) continue;
+    const bucket = `${info.key}|${bucketOf(e, info.limit.period)}`;
+    if (!touched.has(bucket)) continue;
+    if (!groups.has(bucket)) groups.set(bucket, { max: info.limit.max, entries: [] });
+    groups.get(bucket).entries.push(e);
+  }
+
+  let cancelled = 0;
+  for (const { max, entries } of groups.values()) {
+    if (entries.length <= max) continue;
+    // Сначала по времени, при равенстве — по id. Простое сравнение строк, без учёта языка браузера.
+    entries.sort((a, b) => (a.ts - b.ts) || (a.id < b.id ? -1 : 1));
+    for (const e of entries.slice(max)) {
+      e.deleted = true;
+      e.synced = false;
+      cancelled++;
+      console.warn('Отменена запись сверх лимита:', describeEntry(e), new Date(e.ts).toLocaleString());
+    }
+  }
+  return cancelled;
 }
 
 async function fetchAllRows() {
@@ -497,11 +555,16 @@ async function sync() {
       storage.save(save);
     }
 
-    // 2. Pull + merge: забрать всё из облака и слить
+        // 2. Pull + merge: забрать всё из облака и слить
     const rows = await fetchAllRows();
-    mergeEntries(rows.map(fromRow), true);
+    const added = mergeEntries(rows.map(fromRow), true);
+    const cancelled = enforceLimits(added);
     storage.save(save);
     render();
+    if (cancelled) {
+      showMessage(`После синхронизации отменено записей сверх лимита: ${cancelled}`);
+      syncAgain = true; // отправить отмены в облако
+    }
     setSyncStatus(`✅ ${new Date().toLocaleTimeString().slice(0, 5)}`);
   } catch (e) {
     console.error('Ошибка синхронизации:', e);
@@ -953,10 +1016,12 @@ async function importSave(file) {
       alert('Файл не похож на сохранение Life RPG или создан более новой версией игры');
       return;
     }
-    const added = mergeEntries(data.log, false);
+        const added = mergeEntries(data.log, false);
+    const cancelled = enforceLimits(added);
     storage.save(save);
     render();
-    showMessage(`Импортировано новых записей: ${added}`);
+    showMessage(`Импортировано новых записей: ${added.length}` +
+      (cancelled ? `, отменено сверх лимита: ${cancelled}` : ''));
     sync();
   } catch (e) {
     alert('Не удалось прочитать файл: ' + e.message);
