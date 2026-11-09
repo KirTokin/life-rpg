@@ -273,3 +273,31 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   color: var(--ember);
   font-size: 13px;
 }
+
+/* Ачивка с доступной наградой */
+.ach.ready {
+  border-color: var(--gold);
+  box-shadow: 0 0 12px rgba(201, 169, 110, 0.25);
+}
+.claim-btn {
+  margin-top: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-color: var(--gold);
+  color: var(--gold);
+}
+
+/* Счётчик доступных наград на вкладке */
+.tab-badge {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 9px;
+  background: var(--ember);
+  color: #fff;
+  font-family: Georgia, serif;
+  font-size: 12px;
+  line-height: 18px;
+}
+.tab-badge:empty { display: none; }

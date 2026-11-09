@@ -32,6 +32,7 @@ function validateConfig() {
   ACHIEVEMENTS.forEach(a => {
     if (achIds.has(a.id)) errors.push(`Повтор id ачивки: ${a.id}`);
     achIds.add(a.id);
+    if (!Number.isInteger(a.gold) || a.gold < 0) errors.push(`Ачивка ${a.id}: gold должен быть целым ≥ 0`);
     const c = a.condition;
     if (!c) errors.push(`Ачивка ${a.id}: нет condition`);
     else if (c.questId && !questIds.has(c.questId)) errors.push(`Ачивка ${a.id}: неизвестный квест ${c.questId}`);
@@ -75,7 +76,7 @@ validateConfig();
 
 // ===== Локальное сохранение =====
 const STORAGE_KEY = 'life-rpg-save';
-const SAVE_VERSION = 4;
+const SAVE_VERSION = 5;
 
 // Миграции сохранения. Ключ — версия, ИЗ которой мигрируем.
 // Каждая функция переводит данные ровно на одну версию вперёд.
@@ -83,6 +84,9 @@ const SAVE_VERSION = 4;
 const MIGRATIONS = {
   // v3 → v4: добавлен владелец данных (id аккаунта Supabase)
   3: (data) => ({ ...data, version: 4, ownerId: null }),
+  // v4 → v5: новый тип записи 'claim'. Данные не меняются, но старая версия игры
+  // не должна молча открывать журнал с записями, которых не понимает
+  4: (data) => ({ ...data, version: 5 }),
 };
 
 // Прогоняет сохранение через цепочку миграций до текущей версии.
@@ -166,6 +170,8 @@ function isValidEntry(e) {
         && (e.gold === undefined || (Number.isInteger(e.gold) && e.gold >= 0));
     case 'purchase':
       return typeof e.rewardId === 'string' && Number.isInteger(e.cost) && e.cost > 0;
+      case 'claim':
+      return typeof e.achievementId === 'string' && Number.isInteger(e.gold) && e.gold >= 0;
     default:
       return false;
   }
@@ -296,6 +302,7 @@ function computeState(log) {
   let gold = 0;
   const quests = [];
   const purchases = [];
+  const claims = new Map(); // achievementId → первая запись забора награды
 
   // Переход на новую версию баланса: уровень и XP сохраняются,
   // gainXp(…, 0, …) только поднимает уровень, если по новой кривой XP уже хватает
@@ -316,16 +323,20 @@ function computeState(log) {
       switchBalance(vIndex + 1);
     }
     const b = BALANCE_HISTORY[vIndex];
+    const type = entryType(e);
 
-    if (entryType(e) === 'quest') {
+    if (type === 'quest') {
       gainXp(hero, e.xp, b.hero);
       if (stats[e.stat]) gainXp(stats[e.stat], e.xp, b.stat);
       totalXp += e.xp;
       gold += questGold(e, b);
       quests.push(e);
-    } else if (entryType(e) === 'purchase') {
+    } else if (type === 'purchase') {
       gold -= e.cost;
       purchases.push(e);
+    } else if (type === 'claim') {
+      // Дубли (забор на двух устройствах офлайн) — засчитывается самый ранний
+      if (!claims.has(e.achievementId)) claims.set(e.achievementId, e);
     }
   }
 
@@ -333,11 +344,24 @@ function computeState(log) {
   if (vIndex !== BALANCE_HISTORY.length - 1) switchBalance(BALANCE_HISTORY.length - 1);
 
   const view = { hero, stats, totalXp, quests, purchases };
-  view.achievements = ACHIEVEMENTS.map(a => ({ ...a, ...evaluateCondition(a.condition, view) }));
+  view.achievements = ACHIEVEMENTS.map(a => {
+    const result = evaluateCondition(a.condition, view);
+    const claim = claims.get(a.id);
+    return {
+      ...a,
+      ...result,
+      claimed: Boolean(claim),
+      claimGold: claim ? claim.gold : 0,
+      ready: result.unlocked && !claim, // открыта, награда ещё не забрана
+    };
+  });
+
+  // Золото за ачивку — только если она открыта И награда забрана
   const achGold = view.achievements
-    .filter(a => a.unlocked)
-    .reduce((sum, a) => sum + a.gold, 0);
+    .filter(a => a.unlocked && a.claimed)
+    .reduce((sum, a) => sum + a.claimGold, 0);
   view.gold = gold + achGold;
+  view.readyCount = view.achievements.filter(a => a.ready).length;
   return view;
 }
 
@@ -367,7 +391,9 @@ function periodCounts() {
   const week = new Map();
   for (const e of save.log) {
     if (!isActive(e) || e.ts < weekStart) continue; // начало недели всегда не позже начала суток
-    const id = entryType(e) === 'quest' ? `quest:${e.questId}` : `purchase:${e.rewardId}`;
+    const type = entryType(e);
+    if (type !== 'quest' && type !== 'purchase') continue; // у забора наград лимитов нет
+    const id = type === 'quest' ? `quest:${e.questId}` : `purchase:${e.rewardId}`;
     if (e.ts >= dayStart) day.set(id, (day.get(id) ?? 0) + 1);
     week.set(id, (week.get(id) ?? 0) + 1);
   }
@@ -398,25 +424,35 @@ function findOrphansText() {
   const questIds = new Set(QUESTS.map(q => q.id));
   const statIds = new Set(STATS.map(s => s.id));
   const rewardIds = new Set(REWARDS.map(r => r.id));
+  const achIds = new Set(ACHIEVEMENTS.map(a => a.id));
   const quests = new Map();
   const stats = new Map();
   const rewards = new Map();
+  const achievements = new Map();
   const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
 
   for (const e of save.log) {
     if (!isActive(e)) continue;
-    if (entryType(e) === 'quest') {
+    const type = entryType(e);
+    if (type === 'quest') {
       if (!questIds.has(e.questId)) bump(quests, e.questId);
       if (!statIds.has(e.stat)) bump(stats, e.stat);
-    } else if (entryType(e) === 'purchase') {
+    } else if (type === 'purchase') {
       if (!rewardIds.has(e.rewardId)) bump(rewards, e.rewardId);
+    } else if (type === 'claim') {
+      if (!achIds.has(e.achievementId)) bump(achievements, e.achievementId);
     }
   }
 
   const fmt = (label, map) => map.size
     ? `${label}: ${[...map].map(([id, n]) => `${id} (записей: ${n})`).join(', ')}`
     : null;
-  const parts = [fmt('квесты', quests), fmt('статы', stats), fmt('награды', rewards)].filter(Boolean);
+  const parts = [
+    fmt('квесты', quests),
+    fmt('статы', stats),
+    fmt('награды', rewards),
+    fmt('ачивки', achievements),
+  ].filter(Boolean);
 
   const text = parts.length
     ? `⚠️ В журнале есть id, которых нет в config.js — ${parts.join('; ')}. ` +
@@ -442,8 +478,10 @@ function toRow(e) {
   const row = { id: e.id, type, ts: e.ts, deleted: !!e.deleted };
   if (type === 'quest') {
     Object.assign(row, { quest_id: e.questId, stat: e.stat, xp: e.xp, gold: e.gold ?? null });
-  } else {
+  } else if (type === 'purchase') {
     Object.assign(row, { reward_id: e.rewardId, cost: e.cost });
+  } else if (type === 'claim') {
+    Object.assign(row, { achievement_id: e.achievementId, gold: e.gold });
   }
   return row;
 }
@@ -454,8 +492,10 @@ function fromRow(r) {
   if (r.type === 'quest') {
     Object.assign(e, { questId: r.quest_id, stat: r.stat, xp: r.xp });
     if (r.gold !== null) e.gold = r.gold;
-  } else {
+  } else if (r.type === 'purchase') {
     Object.assign(e, { rewardId: r.reward_id, cost: r.cost });
+  } else if (r.type === 'claim') {
+    Object.assign(e, { achievementId: r.achievement_id, gold: r.gold });
   }
   return e;
 }
@@ -552,7 +592,7 @@ async function fetchAllRows() {
   let from = 0;
   while (true) {
     const { data, error } = await db.from('log_entries')
-      .select('id, type, quest_id, stat, xp, gold, reward_id, cost, ts, deleted')
+      .select('id, type, quest_id, stat, xp, gold, reward_id, cost, achievement_id, ts, deleted')
       .order('ts', { ascending: true })
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -675,11 +715,12 @@ function commit(entry, before, baseMessage) {
     );
   }
 
+  // Ачивки, открывшиеся этим действием: эффекта нет, только сообщение
   after.achievements.forEach((a, i) => {
-    if (a.unlocked && !before.achievements[i].unlocked) {
-      msg += ` · 🏆 ${a.name} (+${a.gold} 🪙)`;
-      showEffect(ASSETS.achievement, a.name, `${a.desc} · +${a.gold} 🪙`);
-    }
+    if (!a.unlocked || before.achievements[i].unlocked) return;
+    msg += a.claimed
+      ? ` · 🏆 ${a.name} снова получена (+${a.claimGold} 🪙)`
+      : ` · 🏆 Доступна награда: ${a.name}`;
   });
 
   showMessage(msg);
@@ -750,10 +791,38 @@ function buyReward(rewardId) {
   commit(entry, before, () => `${reward.icon} ${reward.name} куплено за ${reward.cost} 🪙. Наслаждайтесь!`);
 }
 
+function claimAchievement(achievementId) {
+  const before = getState();
+  const a = before.achievements.find(x => x.id === achievementId);
+  if (!a) {
+    console.error('Ачивка не найдена:', achievementId);
+    return;
+  }
+  if (!a.ready) {
+    showMessage(a.claimed ? 'Награда уже получена' : 'Условия ачивки ещё не выполнены');
+    return;
+  }
+
+  const entry = {
+    id: crypto.randomUUID(),
+    type: 'claim',
+    achievementId: a.id,
+    gold: a.gold,
+    ts: Date.now(),
+  };
+  commit(entry, before, () => `🏆 ${a.name}: получено +${a.gold} 🪙`);
+  showEffect(ASSETS.achievement, a.name, `${a.desc} · +${a.gold} 🪙`);
+}
+
 function describeEntry(e) {
-  if (entryType(e) === 'purchase') {
+  const type = entryType(e);
+  if (type === 'purchase') {
     const r = REWARDS.find(x => x.id === e.rewardId);
     return `покупку «${r ? r.name : e.rewardId}»`;
+  }
+  if (type === 'claim') {
+    const a = ACHIEVEMENTS.find(x => x.id === e.achievementId);
+    return `получение награды за ачивку «${a ? a.name : e.achievementId}»`;
   }
   const q = QUESTS.find(x => x.id === e.questId);
   return `квест «${q ? q.name : e.questId}»`;
@@ -989,18 +1058,25 @@ function render() {
       </button>`;
   })}`);
 
-  const unlockedCount = view.achievements.filter(a => a.unlocked).length;
+    const unlockedCount = view.achievements.filter(a => a.unlocked).length;
   setHtml('achievements', html`
     <p class="bar-label">Открыто: ${unlockedCount} / ${view.achievements.length}</p>
-    ${view.achievements.map(a => html`
-      <div class="ach ${a.unlocked ? '' : 'locked'}">
-        ${iconImg(a.unlocked ? (a.image ?? ASSETS.trophy) : ASSETS.lock, 'ach-icon')}
-        <div class="ach-body">
-          <strong>${a.name}</strong> <span class="gold">+${goldLabel(a.gold)}</span>
-          <small>${a.desc} · ${a.current} / ${a.target}</small>
-          ${a.unlocked ? '' : renderBar(a.current, a.target)}
-        </div>
-      </div>`)}`);
+    ${view.achievements.map(a => {
+      let status = '';
+      if (a.unlocked && a.claimed) status = ' · получено ✓';
+      else if (!a.unlocked && a.claimed) status = ' · награда вернётся при выполнении условий';
+      return html`
+        <div class="ach ${a.unlocked ? '' : 'locked'} ${a.ready ? 'ready' : ''}">
+          ${iconImg(a.unlocked ? (a.image ?? ASSETS.trophy) : ASSETS.lock, 'ach-icon')}
+          <div class="ach-body">
+            <strong>${a.name}</strong> <span class="gold">+${goldLabel(a.gold)}</span>
+            <small>${a.desc} · ${a.current} / ${a.target}${status}</small>
+            ${a.unlocked ? '' : renderBar(a.current, a.target)}
+            ${a.ready ? html`<button class="claim-btn" data-claim="${a.id}">Забрать награду</button>` : ''}
+          </div>
+        </div>`;
+    })}`);
+  document.getElementById('ach-badge').textContent = view.readyCount || '';
   updatePendingBadge();
   updateBackupHint();
   updateConfigWarning();
@@ -1144,6 +1220,11 @@ document.getElementById('quests').addEventListener('click', (e) => {
 document.getElementById('shop').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-reward]');
   if (btn && !btn.disabled) buyReward(btn.dataset.reward);
+});
+
+document.getElementById('achievements').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-claim]');
+  if (btn) claimAchievement(btn.dataset.claim);
 });
 
 document.querySelector('.tabs').addEventListener('click', (e) => {
