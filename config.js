@@ -73,12 +73,22 @@ const ACHIEVEMENTS = [
   { id: 'first-buy',   icon: '🎁', name: 'Заслужил',            desc: 'Купить первую награду',               gold: 10,  condition: { type: 'purchaseCount', count: 1 } },
 ];
 
-// ===== Баланс =====
-const BALANCE = {
-  hero: { base: 100, power: 1.5 },
-  stat: { base: 50,  power: 1.3 },
-  goldPerXp: 0.5,
-};
+// ===== Баланс: история версий =====
+// Каждая версия действует с даты from (локальная дата, с начала суток).
+// Чтобы изменить баланс — ДОБАВЬТЕ новую версию в конец с сегодняшней датой.
+// Старые версии не редактировать: по ним считается уже достигнутый прогресс.
+// Кривая уровня: XP до следующего уровня = base · level^power
+const BALANCE_HISTORY = [
+  {
+    from: '2026-01-01',
+    hero: { base: 100, power: 1.5 },
+    stat: { base: 50,  power: 1.3 },
+    goldPerXp: 0.5,
+  },
+];
+
+// Текущий баланс (последняя версия) — для новых действий и отображения
+const BALANCE = BALANCE_HISTORY[BALANCE_HISTORY.length - 1];
 
 const PERIOD_NAMES = { day: 'сегодня', week: 'на неделе' };
 const DAY_MS = 24 * 60 * 60 * 1000;

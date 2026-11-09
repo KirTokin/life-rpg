@@ -51,6 +51,24 @@ function validateConfig() {
     }
   });
 
+  if (!Array.isArray(BALANCE_HISTORY) || !BALANCE_HISTORY.length) {
+    errors.push('BALANCE_HISTORY пуст');
+  }
+  BALANCE_HISTORY.forEach((b, i) => {
+    const t = balanceStart(b);
+    if (!Number.isFinite(t)) errors.push(`BALANCE_HISTORY[${i}]: некорректная дата from '${b.from}'`);
+    if (i > 0 && !(t > balanceStart(BALANCE_HISTORY[i - 1]))) {
+      errors.push(`BALANCE_HISTORY[${i}]: даты from должны возрастать`);
+    }
+    if (!(b.hero?.base > 0 && b.hero?.power > 0 && b.stat?.base > 0 && b.stat?.power > 0)) {
+      errors.push(`BALANCE_HISTORY[${i}]: некорректные кривые hero/stat`);
+    }
+    if (!(b.goldPerXp >= 0)) errors.push(`BALANCE_HISTORY[${i}]: некорректный goldPerXp`);
+  });
+  if (balanceStart(BALANCE) > Date.now()) {
+    errors.push('Последняя версия баланса начинается в будущем — укажите сегодняшнюю или прошедшую дату');
+  }
+
   errors.forEach(e => console.error('Ошибка конфига:', e));
 }
 validateConfig();
@@ -222,8 +240,14 @@ function gainXp(entity, amount, curve) {
   }
 }
 
-function questGold(e) {
-  return e.gold ?? Math.round(e.xp * BALANCE.goldPerXp);
+// Золото за запись квеста: сохранённое в записи, иначе — по курсу версии баланса на момент записи
+function questGold(e, balance) {
+  return e.gold ?? Math.round(e.xp * balance.goldPerXp);
+}
+
+// Начало действия версии баланса (timestamp)
+function balanceStart(version) {
+  return new Date(version.from + 'T00:00:00').getTime();
 }
 
 function evaluateCondition(cond, view) {
@@ -273,19 +297,40 @@ function computeState(log) {
   const quests = [];
   const purchases = [];
 
-  for (const e of log) {
+  // Переход на новую версию баланса: уровень и XP сохраняются,
+  // gainXp(…, 0, …) только поднимает уровень, если по новой кривой XP уже хватает
+  let vIndex = 0;
+  const switchBalance = (index) => {
+    vIndex = index;
+    const b = BALANCE_HISTORY[vIndex];
+    gainXp(hero, 0, b.hero);
+    Object.values(stats).forEach(st => gainXp(st, 0, b.stat));
+  };
+
+  // Записи — строго по времени: от этого зависит, какая версия баланса к ним применяется
+  const ordered = [...log].sort((a, b) => a.ts - b.ts);
+
+  for (const e of ordered) {
     if (!isActive(e)) continue;
+    while (vIndex + 1 < BALANCE_HISTORY.length && e.ts >= balanceStart(BALANCE_HISTORY[vIndex + 1])) {
+      switchBalance(vIndex + 1);
+    }
+    const b = BALANCE_HISTORY[vIndex];
+
     if (entryType(e) === 'quest') {
-      gainXp(hero, e.xp, BALANCE.hero);
-      if (stats[e.stat]) gainXp(stats[e.stat], e.xp, BALANCE.stat);
+      gainXp(hero, e.xp, b.hero);
+      if (stats[e.stat]) gainXp(stats[e.stat], e.xp, b.stat);
       totalXp += e.xp;
-      gold += questGold(e);
+      gold += questGold(e, b);
       quests.push(e);
     } else if (entryType(e) === 'purchase') {
       gold -= e.cost;
       purchases.push(e);
     }
   }
+
+  // Довести состояние до текущей версии баланса, даже если после её начала ещё не было записей
+  if (vIndex !== BALANCE_HISTORY.length - 1) switchBalance(BALANCE_HISTORY.length - 1);
 
   const view = { hero, stats, totalXp, quests, purchases };
   view.achievements = ACHIEVEMENTS.map(a => ({ ...a, ...evaluateCondition(a.condition, view) }));
