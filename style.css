@@ -56,38 +56,81 @@
 
 body {
   margin: 0;
-  padding: 24px 16px;
-  display: flex;
-  justify-content: center;
+  min-height: 100vh;
   background: radial-gradient(ellipse at top, #1d1714 0%, var(--bg) 60%) fixed, var(--bg);
   color: var(--text);
   font-family: Georgia, 'Times New Roman', serif;
 }
 
-.card {
-  width: 100%;
-  max-width: 440px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 20px;
-  box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
-}
-
-h1, h2, h3, .tab { font-family: var(--font-title); letter-spacing: 0.04em; }
+h1, h2, h3 { font-family: var(--font-title); letter-spacing: 0.04em; }
 h1 { font-size: 26px; margin: 12px 0 8px; color: var(--gold); text-align: center; }
 h1 .lvl { color: var(--text); font-size: 20px; }
 h2 {
   font-size: 20px;
-  margin: 24px 0 12px;
+  margin: 0 0 12px;
   color: var(--gold);
   border-bottom: 1px solid var(--border);
   padding-bottom: 4px;
 }
-h3 { font-size: 17px; margin: 18px 0 8px; display: flex; align-items: center; gap: 6px; }
 
 .icon { width: 1.2em; height: 1.2em; vertical-align: -0.25em; }
 .img-missing { visibility: hidden; }
+
+/* ===== Раскладка: телефон и узкие экраны (по умолчанию) ===== */
+.layout {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 520px;
+  margin: 0 auto;
+  padding: 16px;
+}
+.col { flex-direction: column; gap: 16px; min-width: 0; }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+  box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+}
+
+/* Меню экранов — прилипает к верху при прокрутке */
+.screen-tabs {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  display: flex;
+  gap: 4px;
+  padding: 8px;
+  background: rgba(13, 11, 10, 0.95);
+  border-bottom: 1px solid var(--border);
+}
+.screen-tabs button,
+.side-tabs button {
+  flex: 1;
+  padding: 10px 4px;
+  font-family: var(--font-title);
+  font-size: 15px;
+  letter-spacing: 0.04em;
+}
+.screen-tabs button.active,
+.side-tabs button.active {
+  border-color: var(--gold);
+  color: var(--gold);
+  background: #2c2420;
+}
+.side-tabs { display: none; gap: 6px; margin-bottom: 12px; }
+
+/* Один экран за раз: всё скрыто, кроме выбранного в body[data-active] */
+.screen { display: none; }
+.col-right { display: none; }
+body[data-active="hero"] .col-left,
+body[data-active="quests"] .col-center,
+body[data-active="shop"] .col-right,
+body[data-active="achievements"] .col-right { display: flex; }
+body[data-active="shop"] #shop,
+body[data-active="achievements"] #achievements { display: block; }
 
 /* ===== Герой ===== */
 .hero-card {
@@ -129,10 +172,33 @@ h3 { font-size: 17px; margin: 18px 0 8px; display: flex; align-items: center; ga
 .bar-label { font-size: 12px; color: var(--muted); margin-top: 4px; text-align: right; }
 
 .stat { margin-bottom: 12px; }
+.stat:last-child { margin-bottom: 0; }
 .stat-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
 
 .gold { color: var(--gold); font-weight: bold; white-space: nowrap; }
-.message { min-height: 20px; color: var(--ember); font-weight: bold; margin: 8px 0 0; text-align: center; }
+
+/* ===== Всплывающее сообщение ===== */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translate(-50%, 20px);
+  z-index: 90;
+  max-width: min(92vw, 560px);
+  margin: 0;
+  padding: 10px 16px;
+  background: var(--panel-2);
+  border: 1px solid var(--ember);
+  border-radius: 6px;
+  color: var(--ember);
+  font-weight: bold;
+  text-align: center;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.6);
+  opacity: 0;
+  pointer-events: none; /* невидимая плашка не перехватывает клики */
+  transition: opacity 0.25s, transform 0.25s;
+}
+.toast.visible { opacity: 1; transform: translate(-50%, 0); }
 
 /* ===== Кнопки ===== */
 button {
@@ -163,9 +229,39 @@ button:hover:not(:disabled) { border-color: var(--gold); }
 .quest:disabled { opacity: 0.4; cursor: default; }
 .quest.reward { border-left-color: var(--gold); }
 
-.tabs { display: flex; gap: 6px; margin: 24px 0 8px; }
-.tab { flex: 1; padding: 10px; font-size: 16px; }
-.tab.active { border-color: var(--gold); color: var(--gold); background: #2c2420; }
+/* ===== Квадратики статов в квестах ===== */
+.stat-tabs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.stat-tab {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border-top: 3px solid var(--c);
+}
+.stat-tab.active {
+  background: #2c2420;
+  border-color: var(--c);
+  box-shadow: 0 0 10px rgba(201, 169, 110, 0.25);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--c) 35%, transparent);
+}
+.stat-tab-icon { width: 28px; height: 28px; }
+.stat-tab-name {
+  max-width: 100%;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stat-tab.active .stat-tab-name { color: var(--text); }
+.stat-tab-count { position: absolute; top: 2px; right: 5px; font-size: 11px; color: var(--gold); }
 
 /* ===== Ачивки ===== */
 .ach {
@@ -179,13 +275,35 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   margin-bottom: 8px;
 }
 .ach.locked { opacity: 0.5; }
+.ach.ready { border-color: var(--gold); box-shadow: 0 0 12px rgba(201, 169, 110, 0.25); }
 .ach-icon { width: 36px; height: 36px; flex-shrink: 0; }
 .ach-body { flex: 1; }
 .ach small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
 .ach .bar { height: 6px; margin-top: 6px; }
+.claim-btn {
+  margin-top: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  border-color: var(--gold);
+  color: var(--gold);
+}
 
-/* ===== Инструменты, вход, подвал ===== */
-.tools { display: flex; gap: 6px; margin-top: 24px; }
+.tab-badge {
+  display: inline-block;
+  min-width: 18px;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 9px;
+  background: var(--ember);
+  color: #fff;
+  font-family: Georgia, serif;
+  font-size: 12px;
+  line-height: 18px;
+}
+.tab-badge:empty { display: none; }
+
+/* ===== Инструменты, вход, служебные строки ===== */
+.tools { display: flex; gap: 6px; }
 .tools button { flex: 1; padding: 8px; font-size: 13px; }
 .tools button.danger { border-color: var(--blood); color: #e08a7a; }
 
@@ -201,6 +319,7 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   font-size: 16px; /* меньше 16px — iPhone приближает экран при вводе */
 }
 .login button { padding: 10px; border-color: var(--gold); color: var(--gold); }
+.login .hint { color: var(--muted); font-size: 12px; text-align: center; }
 .sync-bar {
   display: flex;
   justify-content: space-between;
@@ -210,8 +329,19 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   color: var(--muted);
 }
 .sync-bar button { padding: 6px 10px; font-size: 13px; }
+.pending { color: var(--ember); }
 
-.credits { margin-top: 20px; font-size: 11px; color: var(--muted); text-align: center; }
+.config-warning {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--ember);
+  border-radius: 4px;
+  color: var(--ember);
+  font-size: 13px;
+}
+.backup-hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); text-align: center; }
+
+.credits { padding: 0 16px 24px; font-size: 11px; color: var(--muted); text-align: center; }
 .credits a { color: var(--muted); }
 
 /* ===== Эффекты ===== */
@@ -229,17 +359,15 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   text-align: center;
   cursor: pointer;
 }
-.fx[hidden] { display: none; } /* без этого display: flex перебивает атрибут hidden */
+.fx[hidden] { display: none; }
 .fx img { width: min(60vw, 260px); }
 .fx-title { font-family: var(--font-title); font-size: 30px; color: var(--gold); }
 .fx-sub { font-size: 15px; }
-
 .fx.play { animation: fx-fade 2.6s ease forwards; }
 .fx.play img {
   animation: fx-pop 0.6s ease-out,
              fx-glow 1.6s ease-in-out 0.6s infinite alternate;
 }
-
 @keyframes fx-fade {
   0% { opacity: 0; }
   10% { opacity: 1; }
@@ -254,50 +382,38 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   from { filter: drop-shadow(0 0 6px var(--ember)); }
   to { filter: drop-shadow(0 0 28px var(--ember)); }
 }
-
-/* Уважаем системную настройку «уменьшить движение» */
 @media (prefers-reduced-motion: reduce) {
   .fx.play, .fx.play img { animation: none; }
 }
 
-.pending { color: var(--ember); }
-.login .hint { color: var(--muted); font-size: 12px; text-align: center; }
+/* ===== ПК: три колонки (должно быть в конце файла, чтобы перекрывать правила выше) ===== */
+@media (min-width: 1100px) {
+  .screen-tabs { display: none; }
+  .side-tabs { display: flex; }
 
-.backup-hint { margin: 8px 0 0; font-size: 12px; color: var(--muted); text-align: center; }
+  .layout {
+    display: grid;
+    grid-template-columns: 340px minmax(0, 1fr) 360px;
+    align-items: start;
+    gap: 20px;
+    max-width: 1440px;
+    padding: 24px;
+  }
 
-.config-warning {
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  border: 1px solid var(--ember);
-  border-radius: 4px;
-  color: var(--ember);
-  font-size: 13px;
-}
+  /* Все колонки видны всегда */
+  .col-left,
+  .col-center,
+  .col-right { display: flex; }
 
-/* Ачивка с доступной наградой */
-.ach.ready {
-  border-color: var(--gold);
-  box-shadow: 0 0 12px rgba(201, 169, 110, 0.25);
-}
-.claim-btn {
-  margin-top: 8px;
-  padding: 6px 12px;
-  font-size: 13px;
-  border-color: var(--gold);
-  color: var(--gold);
-}
+  /* Боковые колонки не уезжают при прокрутке длинного списка квестов */
+  .col-left,
+  .col-right { position: sticky; top: 24px; }
 
-/* Счётчик доступных наград на вкладке */
-.tab-badge {
-  display: inline-block;
-  min-width: 18px;
-  padding: 0 5px;
-  margin-left: 4px;
-  border-radius: 9px;
-  background: var(--ember);
-  color: #fff;
-  font-family: Georgia, serif;
-  font-size: 12px;
-  line-height: 18px;
+  /* Справа — магазин или ачивки, по body[data-right] */
+  #shop,
+  #achievements { display: block; }
+  body[data-right="shop"] #achievements,
+  body[data-right="achievements"] #shop { display: none; }
+
+  .hero-card { max-width: 240px; }
 }
-.tab-badge:empty { display: none; }

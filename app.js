@@ -1030,19 +1030,30 @@ function render() {
       </div>`;
   })}`);
 
-  setHtml('quests', html`${STATS.map(s => {
-    const items = QUESTS.filter(q => q.stat === s.id).map(q => {
-      const left = Math.max(questLeft(q), 0);
-      return html`
-        <button class="quest" style="--c: ${s.color}" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>
-          ${iconImg(q.icon ?? s.icon)}
-          <span class="quest-main">${q.name}
-            <small>${q.goal} · осталось ${PERIOD_NAMES[q.limit.period]}: ${left}</small>
-          </span>
-          <span>+${q.xp}</span>
-        </button>`;
-    });
-    return items.length ? html`<h3>${iconImg(s.icon)} ${s.name}</h3>${items}` : '';
+  // Квадратики статов: иконка, название, число доступных сегодня квестов
+  const questStat = STATS.find(s => s.id === ui.questStat) ?? STATS[0];
+  setHtml('quest-tabs', html`${STATS.map(s => {
+    const available = QUESTS.filter(q => q.stat === s.id && questLeft(q) > 0).length;
+    return html`
+      <button class="stat-tab ${s.id === questStat.id ? 'active' : ''}" style="--c: ${s.color}"
+              data-quest-stat="${s.id}" title="${s.name}">
+        ${iconImg(s.icon, 'stat-tab-icon')}
+        <span class="stat-tab-name">${s.name}</span>
+        <span class="stat-tab-count">${available}</span>
+      </button>`;
+  })}`);
+
+  // Квесты выбранного стата
+  setHtml('quests', html`${QUESTS.filter(q => q.stat === questStat.id).map(q => {
+    const left = Math.max(questLeft(q), 0);
+    return html`
+      <button class="quest" style="--c: ${questStat.color}" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>
+        ${iconImg(q.icon ?? questStat.icon)}
+        <span class="quest-main">${q.name}
+          <small>${q.goal} · осталось ${PERIOD_NAMES[q.limit.period]}: ${left}</small>
+        </span>
+        <span>+${q.xp}</span>
+      </button>`;
   })}`);
 
   setHtml('shop', html`${REWARDS.map(r => {
@@ -1076,7 +1087,7 @@ function render() {
           </div>
         </div>`;
     })}`);
-  document.getElementById('ach-badge').textContent = view.readyCount || '';
+  document.querySelectorAll('.ach-badge').forEach(el => { el.textContent = view.readyCount || ''; });
   updatePendingBadge();
   updateBackupHint();
   updateConfigWarning();
@@ -1086,8 +1097,9 @@ let messageTimer;
 function showMessage(text) {
   const el = document.getElementById('message');
   el.textContent = text;
+  el.classList.add('visible');
   clearTimeout(messageTimer);
-  messageTimer = setTimeout(() => { el.textContent = ''; }, 4000);
+  messageTimer = setTimeout(() => el.classList.remove('visible'), 4000);
 }
 
 // ===== Бэкап =====
@@ -1211,6 +1223,70 @@ db.auth.onAuthStateChange((event, session) => {
   if (currentUser && isLogin) setTimeout(sync, 0);
 });
 
+// ===== Раскладка: экраны и вкладки =====
+// Состояние интерфейса: что открыто. Запоминается на устройстве.
+const UI_KEY = 'life-rpg-ui';
+const ui = { screen: 'hero', right: 'shop', questStat: STATS[0].id };
+try {
+  Object.assign(ui, JSON.parse(localStorage.getItem(UI_KEY)) || {});
+} catch (e) {
+  // хранилище недоступно — используем значения по умолчанию
+}
+if (!STATS.some(s => s.id === ui.questStat)) ui.questStat = STATS[0].id;
+
+function saveUi() {
+  try {
+    localStorage.setItem(UI_KEY, JSON.stringify(ui));
+  } catch (e) {
+    // не критично: в следующий раз откроется экран по умолчанию
+  }
+}
+
+// Применить состояние: атрибуты body управляют раскладкой через CSS
+function applyUi() {
+  document.body.dataset.active = ui.screen;
+  document.body.dataset.right = ui.right;
+  document.querySelectorAll('[data-go-screen]').forEach(b => {
+    b.classList.toggle('active', b.dataset.goScreen === ui.screen);
+  });
+  document.querySelectorAll('[data-go-right]').forEach(b => {
+    b.classList.toggle('active', b.dataset.goRight === ui.right);
+  });
+}
+
+document.addEventListener('click', (e) => {
+  // Меню экранов (телефон)
+  const screenBtn = e.target.closest('[data-go-screen]');
+  if (screenBtn) {
+    ui.screen = screenBtn.dataset.goScreen;
+    if (ui.screen === 'shop' || ui.screen === 'achievements') ui.right = ui.screen;
+    saveUi();
+    applyUi();
+    window.scrollTo(0, 0);
+    return;
+  }
+
+  // Вкладки «Магазин / Ачивки» (ПК)
+  const rightBtn = e.target.closest('[data-go-right]');
+  if (rightBtn) {
+    ui.right = rightBtn.dataset.goRight;
+    if (ui.screen === 'shop' || ui.screen === 'achievements') ui.screen = ui.right;
+    saveUi();
+    applyUi();
+    return;
+  }
+
+  // Квадратики статов в квестах
+  const statBtn = e.target.closest('[data-quest-stat]');
+  if (statBtn) {
+    ui.questStat = statBtn.dataset.questStat;
+    saveUi();
+    render();
+  }
+});
+
+applyUi();
+
 // ===== Обработчики событий =====
 document.getElementById('quests').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-quest]');
@@ -1225,13 +1301,6 @@ document.getElementById('shop').addEventListener('click', (e) => {
 document.getElementById('achievements').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-claim]');
   if (btn) claimAchievement(btn.dataset.claim);
-});
-
-document.querySelector('.tabs').addEventListener('click', (e) => {
-  const tab = e.target.closest('[data-tab]');
-  if (!tab) return;
-  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
-  document.querySelectorAll('.tab-panel').forEach(p => { p.hidden = p.id !== tab.dataset.tab; });
 });
 
 document.getElementById('undo-btn').addEventListener('click', undoLast);

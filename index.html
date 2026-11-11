@@ -7,39 +7,73 @@
   <title>Life RPG</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
-  <div class="card">
-    <section id="hero"></section>
-    <p id="message" class="message"></p>
-    <p id="config-warning" class="config-warning" hidden></p>
-    <section id="auth" class="auth"></section>
+<body data-active="hero" data-right="shop">
 
-    <h2>Характеристики</h2>
-    <section id="stats"></section>
+  <!-- Меню экранов (только на телефоне) -->
+  <nav class="screen-tabs">
+    <button data-go-screen="hero">Герой</button>
+    <button data-go-screen="quests">Квесты</button>
+    <button data-go-screen="shop">Магазин</button>
+    <button data-go-screen="achievements">Ачивки <span class="tab-badge ach-badge"></span></button>
+  </nav>
 
-    <nav class="tabs">
-      <button class="tab active" data-tab="quests">Квесты</button>
-      <button class="tab" data-tab="shop">Магазин</button>
-      <button class="tab" data-tab="achievements">Ачивки <span id="ach-badge" class="tab-badge"></span></button>
-    </nav>
-    <section id="quests" class="tab-panel"></section>
-    <section id="shop" class="tab-panel" hidden></section>
-    <section id="achievements" class="tab-panel" hidden></section>
+  <main class="layout">
 
-    <div class="tools">
-      <button id="undo-btn">Отменить</button>
-      <button id="export-btn">Экспорт</button>
-      <button id="import-btn">Импорт</button>
-      <button id="reset-btn" class="danger">Сброс</button>
+    <!-- Левая колонка / экран «Герой» -->
+    <div class="col col-left screen" data-screen="hero">
+      <section class="panel">
+        <section id="hero"></section>
+        <section id="auth" class="auth"></section>
+      </section>
+
+      <section class="panel">
+        <h2>Характеристики</h2>
+        <div id="stats"></div>
+      </section>
+
+      <section class="panel">
+        <p id="config-warning" class="config-warning" hidden></p>
+        <div class="tools">
+          <button id="undo-btn">Отменить</button>
+          <button id="export-btn">Экспорт</button>
+          <button id="import-btn">Импорт</button>
+          <button id="reset-btn" class="danger">Сброс</button>
+        </div>
+        <p id="backup-hint" class="backup-hint"></p>
+        <input type="file" id="import-file" accept=".json" hidden>
+      </section>
     </div>
-    <p id="backup-hint" class="backup-hint"></p>
-    <input type="file" id="import-file" accept=".json" hidden>
 
-    <footer class="credits">
-      Иконки: <a href="https://game-icons.net" target="_blank" rel="noopener">game-icons.net</a> (CC BY 3.0) ·
-      <a href="https://github.com/KirTokin/life-rpg/blob/main/CREDITS.md" target="_blank" rel="noopener">авторы</a>
-    </footer>
-  </div>
+    <!-- Центр / экран «Квесты» -->
+    <div class="col col-center screen" data-screen="quests">
+      <section class="panel">
+        <h2>Квесты</h2>
+        <nav id="quest-tabs" class="stat-tabs"></nav>
+        <div id="quests"></div>
+      </section>
+    </div>
+
+    <!-- Правая колонка / экраны «Магазин» и «Ачивки» -->
+    <div class="col col-right">
+      <section class="panel">
+        <nav class="side-tabs">
+          <button data-go-right="shop">Магазин</button>
+          <button data-go-right="achievements">Ачивки <span class="tab-badge ach-badge"></span></button>
+        </nav>
+        <div id="shop" class="screen" data-screen="shop"></div>
+        <div id="achievements" class="screen" data-screen="achievements"></div>
+      </section>
+    </div>
+
+  </main>
+
+  <footer class="credits">
+    Иконки: <a href="https://game-icons.net" target="_blank" rel="noopener">game-icons.net</a> (CC BY 3.0) ·
+    <a href="https://github.com/KirTokin/life-rpg/blob/main/CREDITS.md" target="_blank" rel="noopener">авторы</a>
+  </footer>
+
+  <!-- Всплывающее сообщение -->
+  <p id="message" class="toast"></p>
 
   <!-- Слой эффектов: level-up и ачивки -->
   <div id="fx" class="fx" hidden>
