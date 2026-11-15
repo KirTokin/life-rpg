@@ -463,8 +463,8 @@ button:focus-visible,
   .col-left,
   .col-center,
   .col-right { display: flex; }
-  body .today-panel,
-  body .quests-panel { display: block; }
+  body[data-active] .today-panel,
+  body[data-active] .quests-panel { display: block; }
 
   /* Боковые колонки не уезжают при прокрутке длинного списка квестов */
   .col-left,
