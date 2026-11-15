@@ -73,6 +73,35 @@ const QUESTS = [
   },
 ];
 
+// ===== Здоровье и уход за собой =====
+// Каждое выполненное дело восполняет restorePerTask здоровья (до max).
+// В момент смены «дня здоровья» (dayStartHour, по умолчанию 04:00) за каждое
+// невыполненное вчера дело списывается его penalty.
+// Здоровье считается с даты startDate; дни до неё не учитываются.
+// Ниже shopLockBelow магазин наград закрыт.
+const HEALTH = {
+  max: 100,
+  restorePerTask: 1,
+  dayStartHour: 4,
+  startDate: '2026-11-16',
+  shopLockBelow: 30,
+};
+
+// part: morning — утро, day — день, evening — вечер. id не менять: по ним считается история.
+const CARE_TASKS = [
+  { id: 'teeth-am',  part: 'morning', name: 'Почистить зубы',             penalty: 4 },
+  { id: 'exercise',  part: 'morning', name: 'Зарядка 5–10 минут',         penalty: 3 },
+  { id: 'breakfast', part: 'morning', name: 'Завтрак',                    penalty: 3 },
+  { id: 'lunch',     part: 'day',     name: 'Обед',                       penalty: 3 },
+  { id: 'water',     part: 'day',     name: 'Пить воду в течение дня',    penalty: 2 },
+  { id: 'outside',   part: 'day',     name: 'Выйти на улицу, 15+ минут',  penalty: 2 },
+  { id: 'dinner',    part: 'evening', name: 'Ужин',                       penalty: 3 },
+  { id: 'shower',    part: 'evening', name: 'Душ',                        penalty: 4 },
+  { id: 'teeth-pm',  part: 'evening', name: 'Почистить зубы',             penalty: 4 },
+];
+
+const CARE_PARTS = { morning: 'Утро', day: 'День', evening: 'Вечер' };
+
 // ===== Конфиг: награды (цена = 80 🪙 × дни усилий) =====
 // limit необязателен
 const REWARDS = [

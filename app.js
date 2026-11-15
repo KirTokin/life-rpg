@@ -70,6 +70,17 @@ function validateConfig() {
     errors.push('Последняя версия баланса начинается в будущем — укажите сегодняшнюю или прошедшую дату');
   }
 
+  const careIds = new Set();
+  CARE_TASKS.forEach(t => {
+    if (careIds.has(t.id)) errors.push(`Повтор id дела: ${t.id}`);
+    careIds.add(t.id);
+    if (!CARE_PARTS[t.part]) errors.push(`Дело ${t.id}: неизвестная часть дня ${t.part}`);
+    if (!Number.isInteger(t.penalty) || t.penalty < 0) errors.push(`Дело ${t.id}: penalty — целое ≥ 0`);
+  });
+  if (!(HEALTH.max > 0) || !(HEALTH.restorePerTask >= 0) || !Number.isFinite(new Date(HEALTH.startDate + 'T00:00:00').getTime())
+      || !(HEALTH.dayStartHour >= 0 && HEALTH.dayStartHour < 24)) {
+    errors.push('HEALTH: некорректные настройки');
+  }
   QUESTS.filter(q => q.today).forEach(q => {
     const t = q.today;
     if (!Array.isArray(t.days) || !t.days.length || !t.days.every(d => Number.isInteger(d) && d >= 0 && d <= 6)) {
@@ -84,7 +95,7 @@ validateConfig();
 
 // ===== Локальное сохранение =====
 const STORAGE_KEY = 'life-rpg-save';
-const SAVE_VERSION = 5;
+const SAVE_VERSION = 6;
 
 // Миграции сохранения. Ключ — версия, ИЗ которой мигрируем.
 // Каждая функция переводит данные ровно на одну версию вперёд.
@@ -95,6 +106,9 @@ const MIGRATIONS = {
   // v4 → v5: новый тип записи 'claim'. Данные не меняются, но старая версия игры
   // не должна молча открывать журнал с записями, которых не понимает
   4: (data) => ({ ...data, version: 5 }),
+  // v5 → v6: новый тип записи 'care' (дела ухода за собой). Данные не меняются,
+  // но старая версия игры не должна молча открывать журнал с записями, которых не понимает
+  5: (data) => ({ ...data, version: 6 }),
 };
 
 // Прогоняет сохранение через цепочку миграций до текущей версии.
@@ -255,6 +269,8 @@ function isValidEntry(e) {
       return typeof e.rewardId === 'string' && Number.isInteger(e.cost) && e.cost > 0;
       case 'claim':
       return typeof e.achievementId === 'string' && Number.isInteger(e.gold) && e.gold >= 0;
+    case 'care':
+      return typeof e.taskId === 'string';
     default:
       return false;
   }
@@ -536,6 +552,7 @@ function findOrphansText() {
   const stats = new Map();
   const rewards = new Map();
   const achievements = new Map();
+  const care = new Map();
   const bump = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
 
   for (const e of save.log) {
@@ -548,6 +565,8 @@ function findOrphansText() {
       if (!rewardIds.has(e.rewardId)) bump(rewards, e.rewardId);
     } else if (type === 'claim') {
       if (!achIds.has(e.achievementId)) bump(achievements, e.achievementId);
+    } else if (type === 'care') {
+      if (!CARE_TASKS.some(t => t.id === e.taskId)) bump(care, e.taskId);
     }
   }
 
@@ -559,6 +578,7 @@ function findOrphansText() {
     fmt('статы', stats),
     fmt('награды', rewards),
     fmt('ачивки', achievements),
+    fmt('дела ухода', care),
   ].filter(Boolean);
 
   const text = parts.length
@@ -589,6 +609,8 @@ function toRow(e) {
     Object.assign(row, { reward_id: e.rewardId, cost: e.cost });
   } else if (type === 'claim') {
     Object.assign(row, { achievement_id: e.achievementId, gold: e.gold });
+  } else if (type === 'care') {
+    Object.assign(row, { care_id: e.taskId });
   }
   return row;
 }
@@ -603,6 +625,8 @@ function fromRow(r) {
     Object.assign(e, { rewardId: r.reward_id, cost: r.cost });
   } else if (r.type === 'claim') {
     Object.assign(e, { achievementId: r.achievement_id, gold: r.gold });
+  } else if (r.type === 'care') {
+    Object.assign(e, { taskId: r.care_id });
   }
   return e;
 }
@@ -638,6 +662,9 @@ function mergeEntries(entries, fromServer) {
 
 // Лимит для записи: { limit, key } или null, если у записи лимита нет
 function limitFor(e) {
+  if (entryType(e) === 'care') {
+    return { limit: { period: 'care', max: 1 }, key: `care:${e.taskId}` };
+  }
   if (entryType(e) === 'quest') {
     const q = QUESTS.find(x => x.id === e.questId);
     return q ? { limit: q.limit, key: `quest:${q.id}` } : null;
@@ -648,6 +675,7 @@ function limitFor(e) {
 
 // Ключ периода записи: дата дня или дата понедельника её недели
 function bucketOf(e, period) {
+  if (period === 'care') return careDayKey(e.ts);
   if (period === 'day') return dateKey(e.ts);
   const d = new Date(e.ts);
   d.setHours(0, 0, 0, 0);
@@ -699,7 +727,7 @@ async function fetchAllRows() {
   let from = 0;
   while (true) {
     const { data, error } = await db.from('log_entries')
-      .select('id, type, quest_id, stat, xp, gold, reward_id, cost, achievement_id, ts, deleted')
+      .select('id, type, quest_id, stat, xp, gold, reward_id, cost, achievement_id, care_id, ts, deleted')
       .order('ts', { ascending: true })
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -900,6 +928,11 @@ function buyReward(rewardId) {
     return;
   }
   const before = getState();
+  const hp = getHealth().hp;
+  if (hp < HEALTH.shopLockBelow) {
+    showMessage(`Магазин закрыт: здоровье ${hp} — нужно ${HEALTH.shopLockBelow} или больше`);
+    return;
+  }
   if (before.gold < reward.cost) {
     showMessage(`Не хватает ${reward.cost - before.gold} 🪙`);
     return;
@@ -948,6 +981,10 @@ function describeEntry(e) {
   if (type === 'purchase') {
     const r = REWARDS.find(x => x.id === e.rewardId);
     return `покупку «${r ? r.name : e.rewardId}»`;
+  }
+  if (type === 'care') {
+    const t = CARE_TASKS.find(x => x.id === e.taskId);
+    return `дело «${t ? t.name : e.taskId}»`;
   }
   if (type === 'claim') {
     const a = ACHIEVEMENTS.find(x => x.id === e.achievementId);
@@ -1144,6 +1181,7 @@ function renderAuth() {
 
 function render() {
   const view = getState();
+  const health = getHealth();
   const tier = avatarTier(view.hero.level);
   const top = dominantStat(view.stats);
   const frame = top ? top.color : 'var(--gold)';
@@ -1156,6 +1194,7 @@ function render() {
       <img class="avatar" src="${tier.image}" alt="${tier.name}">
     </div>
     <h1>${tier.name} <span class="lvl">· ур. ${view.hero.level}</span></h1>
+    ${renderHealthBar(health)}
     ${renderLevelBar(view.hero, BALANCE.hero)}
     <div class="bar-label">
       Всего опыта: ${view.totalXp} · <span class="gold">${goldLabel(view.gold)}</span>
@@ -1197,10 +1236,13 @@ function render() {
       </button>`;
   })}`);
 
-  setHtml('shop', html`${REWARDS.map(r => {
+  const shopLocked = health.hp < HEALTH.shopLockBelow;
+  setHtml('shop', html`
+    ${shopLocked ? html`<p class="shop-locked">🔒 Магазин закрыт: здоровье ${health.hp} из ${HEALTH.max}. Откроется при ${HEALTH.shopLockBelow}+ — выполняй дела ухода за собой.</p>` : ''}
+    ${REWARDS.map(r => {
     const left = rewardLeft(r);
     const affordable = view.gold >= r.cost;
-    const available = affordable && left > 0;
+    const available = affordable && left > 0 && !shopLocked;
     let note = affordable ? 'Можно купить' : `Не хватает ${r.cost - view.gold}`;
     if (r.limit) note += ` · осталось ${PERIOD_NAMES[r.limit.period]}: ${Math.max(left, 0)}`;
     return html`
@@ -1230,6 +1272,7 @@ function render() {
     })}`);
   document.querySelectorAll('.ach-badge').forEach(el => { el.textContent = view.readyCount || ''; });
   renderToday();
+  renderCare(health);
   updatePendingBadge();
   updateBackupHint();
   updateConfigWarning();
@@ -1436,6 +1479,155 @@ document.addEventListener('click', (e) => {
 
 applyUi();
 
+// ===== Здоровье =====
+// «День здоровья» начинается в HEALTH.dayStartHour (04:00): душ в 00:30 засчитывается вчерашнему дню.
+function careDayKey(ts) {
+  return dateKey(ts - HEALTH.dayStartHour * 60 * 60 * 1000);
+}
+
+function nextDayKey(key) {
+  const d = new Date(key + 'T12:00:00'); // полдень: переход на летнее время не сдвинет дату
+  d.setDate(d.getDate() + 1);
+  return dateKey(d.getTime());
+}
+
+// Активная запись выполнения дела за текущий день здоровья (или null)
+function careDoneToday(taskId) {
+  const today = careDayKey(Date.now());
+  return save.log.find(e => isActive(e) && entryType(e) === 'care'
+    && e.taskId === taskId && careDayKey(e.ts) === today) ?? null;
+}
+
+// Здоровье из журнала. По каждому дню с startDate: сначала +restorePerTask за выполненные дела
+// (не выше max), затем, если день уже закончился, −penalty за каждое невыполненное.
+let healthCache = { key: null, value: null };
+function getHealth() {
+  const today = careDayKey(Date.now());
+  const key = `${saveRevision}|${today}`;
+  if (healthCache.key === key) return healthCache.value;
+
+  const doneByDay = new Map();
+  for (const e of save.log) {
+    if (!isActive(e) || entryType(e) !== 'care') continue;
+    if (!CARE_TASKS.some(t => t.id === e.taskId)) continue;
+    const day = careDayKey(e.ts);
+    if (day < HEALTH.startDate) continue;
+    if (!doneByDay.has(day)) doneByDay.set(day, new Set());
+    doneByDay.get(day).add(e.taskId);
+  }
+
+  let hp = HEALTH.max;
+  let lastPenalty = 0;
+  for (let day = HEALTH.startDate; day <= today; day = nextDayKey(day)) {
+    const done = doneByDay.get(day) ?? new Set();
+    hp = Math.min(HEALTH.max, hp + done.size * HEALTH.restorePerTask);
+    if (day < today) {
+      const penalty = CARE_TASKS.filter(t => !done.has(t.id)).reduce((sum, t) => sum + t.penalty, 0);
+      hp = Math.max(0, hp - penalty);
+      lastPenalty = penalty;
+    }
+  }
+  const started = today >= HEALTH.startDate;
+  const doneToday = started ? (doneByDay.get(today)?.size ?? 0) : 0;
+  const value = { hp, started, lastPenalty, doneToday };
+  healthCache = { key, value };
+  return value;
+}
+
+function renderHealthBar(health) {
+  const pct = health.hp / HEALTH.max * 100;
+  const level = health.hp < HEALTH.shopLockBelow ? 'low' : health.hp < 60 ? 'mid' : 'high';
+  return html`
+    <div class="hp-row" title="Здоровье">
+      <span class="hp-label">❤ Здоровье</span>
+      <div class="bar hp-bar ${level}" role="progressbar" aria-label="Здоровье"
+           aria-valuemin="0" aria-valuemax="${HEALTH.max}" aria-valuenow="${health.hp}">
+        <div class="bar-fill" style="width: ${pct}%"></div>
+      </div>
+      <span class="hp-value">${health.hp}/${HEALTH.max}</span>
+    </div>`;
+}
+
+let careDayShown = careDayKey(Date.now());
+let careBusy = false;
+
+function renderCare(health) {
+  careDayShown = careDayKey(Date.now());
+  const startLabel = new Date(HEALTH.startDate + 'T12:00:00').toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  setHtml('care', html`
+    <div class="care-head">
+      <h3>Уход за собой</h3>
+      <span class="today-count">${health.doneToday} из ${CARE_TASKS.length}</span>
+    </div>
+    <p class="today-note care-rule">
+      Каждое дело: +${HEALTH.restorePerTask} к здоровью. В ${String(HEALTH.dayStartHour).padStart(2, '0')}:00 за невыполненные вчера дела здоровье снижается.
+      ${health.started ? (health.lastPenalty ? ` Вчера: −${health.lastPenalty}.` : '') : ` Здоровье считается с ${startLabel}.`}
+    </p>
+    ${health.hp < HEALTH.shopLockBelow ? html`<p class="shop-locked">Здоровье ${health.hp}: магазин закрыт до ${HEALTH.shopLockBelow}.</p>` : ''}
+    ${Object.entries(CARE_PARTS).map(([part, label]) => {
+      const tasks = CARE_TASKS.filter(t => t.part === part);
+      if (!tasks.length) return '';
+      return html`
+        <div class="care-part">
+          <div class="care-part-name">${label}</div>
+          ${tasks.map(t => {
+            const done = Boolean(careDoneToday(t.id));
+            return html`
+              <button class="care-task ${done ? 'done' : ''}" data-care="${t.id}" aria-pressed="${done ? 'true' : 'false'}" ${careBusy ? 'disabled' : ''}>
+                <span class="care-check" aria-hidden="true">${done ? '✓' : ''}</span>
+                <span class="care-name">${t.name}</span>
+                <span class="care-penalty">${done ? `+${HEALTH.restorePerTask}` : `−${t.penalty}`}</span>
+              </button>`;
+          })}
+        </div>`;
+    })}`);
+}
+
+// Отметить или снять отметку дела за текущий день здоровья
+async function toggleCare(taskId) {
+  if (careBusy) return;
+  const task = CARE_TASKS.find(t => t.id === taskId);
+  if (!task) return;
+  careBusy = true;
+  absorbDisk();
+  const existing = careDoneToday(taskId);
+  let ok;
+  if (existing) {
+    const prevSynced = existing.synced;
+    existing.deleted = true;
+    existing.synced = false;
+    ok = await storage.save(save);
+    if (!ok) {
+      existing.deleted = false;
+      existing.synced = prevSynced;
+      saveRevision++;
+    }
+  } else {
+    const entry = { id: crypto.randomUUID(), type: 'care', taskId, ts: Date.now(), synced: false };
+    save.log.push(entry);
+    ok = await storage.save(save);
+    if (!ok) {
+      const i = save.log.indexOf(entry);
+      if (i !== -1) save.log.splice(i, 1);
+      saveRevision++;
+    }
+  }
+  careBusy = false;
+  render();
+  document.querySelector(`[data-care="${taskId}"]`)?.focus();
+  if (!ok) {
+    showMessage('⚠️ Не удалось сохранить отметку на устройстве. Попробуйте ещё раз.');
+    return;
+  }
+  showMessage(existing ? `Отметка снята: ${task.name}` : `✓ ${task.name}`);
+  sync();
+}
+
+document.getElementById('care').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-care]');
+  if (btn && !btn.disabled) toggleCare(btn.dataset.care);
+});
+
 // ===== Раздел «Сегодня» =====
 // Выполнено ли — считается только по журналу (активные записи за текущую локальную дату).
 // Начатая карточка — локальный черновик интерфейса: не влияет на прогресс, не синхронизируется.
@@ -1612,7 +1804,7 @@ document.getElementById('today').addEventListener('click', (e) => {
 
 // Смена дня при открытой вкладке: раз в 30 секунд проверяем дату
 setInterval(() => {
-  if (dateKey(Date.now()) !== todayDateShown) {
+  if (dateKey(Date.now()) !== todayDateShown || careDayKey(Date.now()) !== careDayShown) {
     todayError = null;
     render();
   }

@@ -438,6 +438,59 @@ button:hover:not(:disabled) { border-color: var(--gold); }
 .today-btn.primary { border-color: var(--gold); color: var(--gold); background: #2c2420; font-weight: bold; }
 .today-btn:disabled { opacity: 0.45; cursor: default; }
 
+/* ===== Здоровье ===== */
+.hp-row { display: flex; align-items: center; gap: 8px; margin: 4px 0 8px; font-size: 13px; }
+.hp-label { color: #e08a7a; white-space: nowrap; }
+.hp-bar { flex: 1; height: 14px; }
+.hp-bar .bar-fill { background: linear-gradient(90deg, #7a1f1f, #c43b3b); transition: width 0.3s; }
+.hp-bar.mid .bar-fill { background: linear-gradient(90deg, #7a4a1f, #c4823b); }
+.hp-bar.low .bar-fill { background: #5a1414; }
+.hp-value { min-width: 52px; text-align: right; color: var(--text); font-weight: bold; }
+
+/* ===== Уход за собой ===== */
+.care { margin-top: 20px; padding-top: 12px; border-top: 1px solid var(--border); }
+.care-head { display: flex; justify-content: space-between; align-items: baseline; }
+.care-head h3 { margin: 0; font-size: 18px; color: var(--gold); }
+.care-rule { margin: 4px 0 10px; }
+.care-part { margin-bottom: 10px; }
+.care-part-name { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+.care-task {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  text-align: left;
+}
+.care-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 2px solid var(--muted);
+  border-radius: 4px;
+  font-weight: bold;
+}
+.care-name { flex: 1; }
+.care-penalty { font-size: 12px; color: #e08a7a; white-space: nowrap; }
+.care-task.done { border-color: #4f7a42; background: #1f2a1c; }
+.care-task.done .care-check { border-color: #8fc77e; background: #8fc77e; color: #10170e; }
+.care-task.done .care-name { color: var(--muted); text-decoration: line-through; }
+.care-task.done .care-penalty { color: #8fc77e; }
+.care-task:disabled { opacity: 0.6; }
+.shop-locked {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--blood);
+  border-radius: 4px;
+  color: #e08a7a;
+  font-size: 13px;
+}
+
 /* Видимый фокус при работе с клавиатуры */
 button:focus-visible,
 .today-card:focus-visible {
