@@ -45,6 +45,32 @@ const QUESTS = [
   { id: 'wakeup',    stat: 'discipline', name: 'Подъём в запланированное время',  xp: 10, limit: { period: 'day',  max: 1 }, goal: '5 р/нед' },
   { id: 'no-phone',  stat: 'discipline', name: 'Без соцсетей до обеда',           xp: 10, limit: { period: 'day',  max: 1 }, goal: '5 р/нед' },
   { id: 'review',    stat: 'discipline', name: 'Недельный обзор и план',          xp: 30, limit: { period: 'week', max: 1 }, goal: '1 р/нед' },
+
+  // ===== Раздел «Сегодня» =====
+  // Квесты с полем today показываются только в разделе «Сегодня», не в общем каталоге.
+  // today.days — дни недели, когда карточка предлагается: 0 — вс, 1 — пн … 6 — сб.
+  {
+    id: 'read-start-10', stat: 'intellect', name: 'Чтение — 10 минут', xp: 10,
+    limit: { period: 'day', max: 1 }, goal: 'каждый день',
+    today: {
+      days: [0, 1, 2, 3, 4, 5, 6],
+      firstStep: 'Открой книгу на закладке и начни читать.',
+      done: 'Прочитаны примерно 10 минут; место остановки отмечено в книге.',
+      hint: 'Можно продолжить, если хочется.',
+      note: 'Одно чтение отмечай один раз: здесь или в квесте «Чтение 30 мин».',
+    },
+  },
+  {
+    id: 'work-focus-20', stat: 'discipline', name: 'Рабочий фокус — 20 минут', xp: 10,
+    limit: { period: 'day', max: 1 }, goal: 'пн–пт',
+    today: {
+      days: [1, 2, 3, 4, 5],
+      firstStep: 'Открой текущую задачу и выбери один конкретный шаг.',
+      done: 'Около 20 минут работы над выбранным шагом; результат и следующий шаг сохранены в рабочем документе.',
+      example: 'Список вопросов, разобранные исходные данные или черновик одного раздела.',
+      hint: 'Этот блок помогает начать. После него продолжается обычный рабочий день.',
+    },
+  },
 ];
 
 // ===== Конфиг: награды (цена = 80 🪙 × дни усилий) =====
@@ -63,7 +89,7 @@ const ACHIEVEMENTS = [
   { id: 'first-quest', icon: '👣', name: 'Первый шаг',          desc: 'Выполнить любой квест',               gold: 20,  condition: { type: 'anyQuestCount', count: 1 } },
   { id: 'quests-100',  icon: '💯', name: 'Сотня',               desc: 'Выполнить 100 квестов',               gold: 200, condition: { type: 'anyQuestCount', count: 100 } },
   { id: 'gym-10',      icon: '🏋️', name: 'Завсегдатай зала',    desc: '10 силовых тренировок',               gold: 100, condition: { type: 'questCount', questId: 'gym', count: 10 } },
-  { id: 'read-30',     icon: '📖', name: 'Книжный червь',       desc: '30 сессий чтения',                    gold: 100, condition: { type: 'questCount', questId: 'read', count: 30 } },
+  { id: 'read-30',     icon: '📖', name: 'Книжный червь',       desc: '30 раз квест «Чтение 30 мин»',        gold: 100, condition: { type: 'questCount', questId: 'read', count: 30 } },
   { id: 'sleep-7',     icon: '😴', name: 'Режим налажен',       desc: 'Сон 7+ часов 7 дней подряд',          gold: 100, condition: { type: 'streak', questId: 'sleep', days: 7 } },
   { id: 'sleep-30',    icon: '🌙', name: 'Мастер сна',          desc: 'Сон 7+ часов 30 дней подряд',         gold: 300, condition: { type: 'streak', questId: 'sleep', days: 30 } },
   { id: 'habit-66',    icon: '🔥', name: 'Привычка сформирована', desc: '66 дней подряд хоть один квест',    gold: 500, condition: { type: 'streak', days: 66 } },

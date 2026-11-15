@@ -124,8 +124,13 @@ h2 {
 
 /* Один экран за раз: всё скрыто, кроме выбранного в body[data-active] */
 .screen { display: none; }
+/* Центральная колонка на телефоне: «Сегодня» и «Квесты» — разные экраны */
+body:not([data-active="today"]) .today-panel,
+body:not([data-active="quests"]) .quests-panel { display: none; }
+.col-center,
 .col-right { display: none; }
 body[data-active="hero"] .col-left,
+body[data-active="today"] .col-center,
 body[data-active="quests"] .col-center,
 body[data-active="shop"] .col-right,
 body[data-active="achievements"] .col-right { display: flex; }
@@ -386,6 +391,60 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   .fx.play, .fx.play img { animation: none; }
 }
 
+/* ===== Раздел «Сегодня» ===== */
+.today-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+.today-date { color: var(--muted); }
+.today-date::first-letter { text-transform: uppercase; }
+.today-count { color: var(--gold); font-weight: bold; white-space: nowrap; }
+
+.today-card {
+  padding: 14px;
+  margin-bottom: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--c, var(--gold));
+  border-radius: 6px;
+  line-height: 1.45;
+}
+.today-card:last-child { margin-bottom: 0; }
+.today-card:focus { outline: none; }
+.today-card.active { border-color: var(--gold); border-left-color: var(--c, var(--gold)); }
+.today-card.done { opacity: 0.85; }
+.today-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.today-card-head h3 { flex: 1; margin: 0; font-size: 18px; color: var(--text); }
+.today-reward { font-size: 13px; color: var(--gold); white-space: nowrap; }
+.today-step { margin: 0 0 6px; font-size: 16px; }
+.today-line { margin: 0 0 6px; font-size: 14px; color: var(--text); }
+.today-hint { margin: 6px 0; font-size: 14px; color: var(--gold); font-style: italic; }
+.today-note { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+.today-done { margin: 0; font-size: 15px; color: #8fc77e; font-weight: bold; }
+.today-error {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  border: 1px solid var(--ember);
+  border-radius: 4px;
+  color: var(--ember);
+  font-size: 13px;
+}
+.today-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.today-btn { flex: 1; min-width: 130px; min-height: 44px; padding: 10px 12px; font-size: 15px; }
+.today-btn.primary { border-color: var(--gold); color: var(--gold); background: #2c2420; font-weight: bold; }
+.today-btn:disabled { opacity: 0.45; cursor: default; }
+
+/* Видимый фокус при работе с клавиатуры */
+button:focus-visible,
+.today-card:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
 /* ===== ПК: три колонки (должно быть в конце файла, чтобы перекрывать правила выше) ===== */
 @media (min-width: 1100px) {
   .screen-tabs { display: none; }
@@ -404,6 +463,8 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   .col-left,
   .col-center,
   .col-right { display: flex; }
+  body .today-panel,
+  body .quests-panel { display: block; }
 
   /* Боковые колонки не уезжают при прокрутке длинного списка квестов */
   .col-left,

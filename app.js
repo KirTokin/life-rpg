@@ -70,6 +70,14 @@ function validateConfig() {
     errors.push('Последняя версия баланса начинается в будущем — укажите сегодняшнюю или прошедшую дату');
   }
 
+  QUESTS.filter(q => q.today).forEach(q => {
+    const t = q.today;
+    if (!Array.isArray(t.days) || !t.days.length || !t.days.every(d => Number.isInteger(d) && d >= 0 && d <= 6)) {
+      errors.push(`Квест ${q.id}: today.days — массив дней недели 0–6`);
+    }
+    if (!t.firstStep || !t.done) errors.push(`Квест ${q.id}: today.firstStep и today.done обязательны`);
+    if (q.limit?.period !== 'day' || q.limit?.max !== 1) errors.push(`Квест ${q.id}: карточке «Сегодня» нужен лимит 1 в день`);
+  });
   errors.forEach(e => console.error('Ошибка конфига:', e));
 }
 validateConfig();
@@ -121,7 +129,58 @@ function createDefaultSave() {
   return { version: SAVE_VERSION, ownerId: null, log: [] };
 }
 
-let saveRevision = 0; // увеличивается при каждом сохранении: признак «журнал изменился»
+let saveRevision = 0; // увеличивается при каждом изменении журнала: признак «журнал изменился»
+
+// Сливает журнал с диска (записанный другой вкладкой) в журнал в памяти.
+// Записи объединяются по id, удаление побеждает. Возвращает { added, changed }.
+function mergeLog(target, diskLog) {
+  const byId = new Map(target.log.map(e => [e.id, e]));
+  const added = [];
+  let changed = false;
+  for (const d of diskLog) {
+    if (!isValidEntry(d)) continue;
+    const local = byId.get(d.id);
+    if (!local) {
+      const copy = { ...d };
+      target.log.push(copy);
+      byId.set(copy.id, copy);
+      added.push(copy);
+    } else if (!!d.deleted !== !!local.deleted) {
+      if (d.deleted) {
+        local.deleted = true;
+        local.synced = !!d.synced;
+        changed = true;
+      }
+      // локальное удаление сильнее: оставляем его и его флаг synced
+    } else if (d.synced && !local.synced) {
+      local.synced = true; // другая вкладка уже отправила эту запись в облако
+      changed = true;
+    }
+  }
+  if (added.length) target.log.sort((a, b) => a.ts - b.ts);
+  return { added, changed: changed || added.length > 0 };
+}
+
+// Читает сохранение с диска и сливает его в память.
+// 'ok' — слито или нечего сливать; 'owner' — на диске данные другого аккаунта; 'newer' — формат новее игры.
+function absorbDisk() {
+  const disk = storage.load();
+  const none = { status: 'ok', added: [], changed: false };
+  if (!disk) return none;
+  if (Number.isInteger(disk.version) && disk.version > SAVE_VERSION) return { ...none, status: 'newer' };
+  const data = migrate(disk);
+  if (!data || !isValidSave(data)) return none; // повреждённое — перезапишем своим
+  if (data.ownerId && save.ownerId && data.ownerId !== save.ownerId) return { ...none, status: 'owner' };
+  let ownerChanged = false;
+  if (data.ownerId && !save.ownerId) {
+    save.ownerId = data.ownerId; // другая вкладка вошла в аккаунт
+    ownerChanged = true;
+  }
+  const { added, changed } = mergeLog(save, data.log);
+  if (changed) saveRevision++;
+  return { status: 'ok', added, changed: changed || ownerChanged };
+}
+
 const storage = {
   load() {
     try {
@@ -132,13 +191,37 @@ const storage = {
       return null;
     }
   },
-  save(data) {
+  // Записывает журнал на диск. Возвращает Promise<boolean>: true — записано.
+  // Блокировка (Web Locks) не даёт двум вкладкам писать одновременно, а перед записью
+  // журнал с диска сливается в память — так запись одной вкладки не затирает другую.
+  // replace: true — записать как есть, без слияния (смена владельца данных).
+  save(data, { replace = false } = {}) {
     saveRevision++;
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-    } catch (e) {
-      console.error('Не удалось сохранить:', e);
+    const write = () => {
+      if (!replace) {
+        const r = absorbDisk();
+        if (r.status !== 'ok') {
+          console.error('Запись отменена: сохранение изменено другой вкладкой', r.status);
+          handleForeignDisk(r.status);
+          return false;
+        }
+        if (r.added.length && enforceLimits(r.added)) saveRevision++;
+      }
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+        return true;
+      } catch (e) {
+        console.error('Не удалось сохранить:', e);
+        return false;
+      }
+    };
+    if (navigator.locks?.request) {
+      return navigator.locks.request(STORAGE_KEY, write).catch(e => {
+        console.error('Не удалось сохранить:', e);
+        return false;
+      });
     }
+    return Promise.resolve(write());
   },
   archive(data) {
     try {
@@ -197,6 +280,30 @@ if (loaded && !loadedOk) {
 }
 
 const save = loadedOk ? migrated : createDefaultSave();
+
+// На диске оказались данные другого аккаунта или более новый формат (другая вкладка):
+// в этой вкладке ничего не пишем, просим перезагрузить страницу
+let foreignDiskShown = false;
+function handleForeignDisk(status) {
+  if (foreignDiskShown) return;
+  foreignDiskShown = true;
+  alert(status === 'newer'
+    ? 'Игра обновилась в другой вкладке. Страница будет перезагружена.'
+    : 'В другой вкладке выполнен вход в другой аккаунт. Страница будет перезагружена.');
+  location.reload();
+}
+
+// Другая вкладка записала журнал — подтягиваем изменения сразу
+window.addEventListener('storage', (e) => {
+  if (e.key !== STORAGE_KEY || e.newValue === null) return;
+  const r = absorbDisk();
+  if (r.status !== 'ok') {
+    handleForeignDisk(r.status);
+    return;
+  }
+  if (r.added.length && enforceLimits(r.added)) saveRevision++;
+  if (r.changed) render();
+});
 if (loadedOk && migrated !== loaded) {
   storage.save(save); // сохраняем результат миграции
 }
@@ -697,9 +804,27 @@ function updatePendingBadge() {
 }
 
 // ===== Действия =====
-function commit(entry, before, baseMessage) {
-  save.log.push({ ...entry, synced: false });
-  storage.save(save);
+// Записывает действие в журнал. Возвращает true, если запись сохранена на устройстве.
+// Сообщение об успехе и награда показываются только после успешной записи.
+async function commit(entry, before, baseMessage) {
+  const stored = { ...entry, synced: false };
+  save.log.push(stored);
+  const ok = await storage.save(save);
+  if (!ok) {
+    const i = save.log.indexOf(stored);
+    if (i !== -1) save.log.splice(i, 1);
+    saveRevision++;
+    render();
+    showMessage('⚠️ Не удалось сохранить действие на устройстве. Попробуйте ещё раз.');
+    return false;
+  }
+  if (stored.deleted) {
+    // при записи выяснилось, что другая вкладка уже исчерпала лимит
+    render();
+    showMessage('Действие уже выполнено в другой вкладке — повтор отменён');
+    sync();
+    return false;
+  }
   const after = getState();
   render();
 
@@ -725,18 +850,21 @@ function commit(entry, before, baseMessage) {
 
   showMessage(msg);
   sync();
+  return true;
 }
 
-function completeQuest(questId) {
+// Выполнение квеста. Возвращает 'saved', 'limit' или 'error'.
+async function completeQuest(questId) {
   const quest = QUESTS.find(q => q.id === questId);
   if (!quest) {
     console.error('Квест не найден:', questId);
-    return;
+    return 'error';
   }
+  absorbDisk(); // учесть выполнения из других вкладок до проверки лимита
   if (questLeft(quest) <= 0) {
     showMessage(`Лимит исчерпан ${PERIOD_NAMES[quest.limit.period]}`);
     render();
-    return;
+    return 'limit';
   }
 
   const before = getState();
@@ -751,7 +879,7 @@ function completeQuest(questId) {
     ts: Date.now(),
   };
 
-  commit(entry, before, (after) => {
+  const ok = await commit(entry, before, (after) => {
     const statConf = STATS.find(s => s.id === quest.stat);
     let msg = `+${quest.xp} XP, +${gold} 🪙 → ${statConf.name}`;
     if (after.stats[quest.stat].level > before.stats[quest.stat].level) {
@@ -762,6 +890,7 @@ function completeQuest(questId) {
     }
     return msg;
   });
+  return ok ? 'saved' : 'error';
 }
 
 function buyReward(rewardId) {
@@ -828,22 +957,30 @@ function describeEntry(e) {
   return `квест «${q ? q.name : e.questId}»`;
 }
 
-function undoLast() {
+async function undoLast() {
   const last = [...save.log].reverse().find(isActive);
   if (!last) {
     showMessage('Нечего отменять');
     return;
   }
   if (!confirm(`Отменить ${describeEntry(last)}?`)) return;
+  const prevSynced = last.synced;
   last.deleted = true;
   last.synced = false;
-  storage.save(save);
+  if (!(await storage.save(save))) {
+    last.deleted = false;
+    last.synced = prevSynced;
+    saveRevision++;
+    render();
+    showMessage('⚠️ Не удалось сохранить отмену. Попробуйте ещё раз.');
+    return;
+  }
   render();
   showMessage('Последнее действие отменено');
   sync();
 }
 
-function resetAll() {
+async function resetAll() {
   if (!confirm('Сбросить весь прогресс НА ВСЕХ УСТРОЙСТВАХ? Отменить сброс будет нельзя.')) return;
   save.log.forEach(e => {
     if (isActive(e)) {
@@ -851,7 +988,11 @@ function resetAll() {
       e.synced = false;
     }
   });
-  storage.save(save);
+  clearTodayDraft();
+  if (!(await storage.save(save))) {
+    showMessage('⚠️ Не удалось сохранить сброс. Обновите страницу и попробуйте ещё раз.');
+    return;
+  }
   render();
   showMessage('Прогресс сброшен');
   sync();
@@ -1033,7 +1174,7 @@ function render() {
   // Квадратики статов: иконка, название, число доступных сегодня квестов
   const questStat = STATS.find(s => s.id === ui.questStat) ?? STATS[0];
   setHtml('quest-tabs', html`${STATS.map(s => {
-    const available = QUESTS.filter(q => q.stat === s.id && questLeft(q) > 0).length;
+    const available = QUESTS.filter(q => !q.today && q.stat === s.id && questLeft(q) > 0).length;
     return html`
       <button class="stat-tab ${s.id === questStat.id ? 'active' : ''}" style="--c: ${s.color}"
               data-quest-stat="${s.id}" title="${s.name}">
@@ -1044,7 +1185,7 @@ function render() {
   })}`);
 
   // Квесты выбранного стата
-  setHtml('quests', html`${QUESTS.filter(q => q.stat === questStat.id).map(q => {
+  setHtml('quests', html`${QUESTS.filter(q => !q.today && q.stat === questStat.id).map(q => {
     const left = Math.max(questLeft(q), 0);
     return html`
       <button class="quest" style="--c: ${questStat.color}" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>
@@ -1088,6 +1229,7 @@ function render() {
         </div>`;
     })}`);
   document.querySelectorAll('.ach-badge').forEach(el => { el.textContent = view.readyCount || ''; });
+  renderToday();
   updatePendingBadge();
   updateBackupHint();
   updateConfigWarning();
@@ -1202,7 +1344,8 @@ function checkOwner(user) {
   storage.archive(save);
   save.log = [];
   save.ownerId = user.id;
-  storage.save(save);
+  clearTodayDraft();
+  storage.save(save, { replace: true });
   render();
   return true;
 }
@@ -1217,6 +1360,7 @@ db.auth.onAuthStateChange((event, session) => {
     return;
   }
 
+  if (event === 'SIGNED_OUT') clearTodayDraft(); // незавершённое действие не переживает выход
   currentUser = user;
   if (!currentUser) syncStatus = '';
   renderAuth();
@@ -1226,12 +1370,17 @@ db.auth.onAuthStateChange((event, session) => {
 // ===== Раскладка: экраны и вкладки =====
 // Состояние интерфейса: что открыто. Запоминается на устройстве.
 const UI_KEY = 'life-rpg-ui';
-const ui = { screen: 'hero', right: 'shop', questStat: STATS[0].id };
+const UI_VERSION = 2; // v2: появился экран «Сегодня», он открывается первым
+const SCREENS = ['today', 'hero', 'quests', 'shop', 'achievements'];
+const ui = { v: UI_VERSION, screen: 'today', right: 'shop', questStat: STATS[0].id };
 try {
-  Object.assign(ui, JSON.parse(localStorage.getItem(UI_KEY)) || {});
+  const stored = JSON.parse(localStorage.getItem(UI_KEY)) || {};
+  if (stored.v === UI_VERSION) Object.assign(ui, stored);
+  else Object.assign(ui, { right: stored.right ?? ui.right, questStat: stored.questStat ?? ui.questStat });
 } catch (e) {
   // хранилище недоступно — используем значения по умолчанию
 }
+if (!SCREENS.includes(ui.screen)) ui.screen = 'today';
 if (!STATS.some(s => s.id === ui.questStat)) ui.questStat = STATS[0].id;
 
 function saveUi() {
@@ -1286,6 +1435,188 @@ document.addEventListener('click', (e) => {
 });
 
 applyUi();
+
+// ===== Раздел «Сегодня» =====
+// Выполнено ли — считается только по журналу (активные записи за текущую локальную дату).
+// Начатая карточка — локальный черновик интерфейса: не влияет на прогресс, не синхронизируется.
+const DRAFT_KEY = 'life-rpg-today-draft';
+const DRAFT_VERSION = 1;
+let todayError = null; // { questId, text } — ошибка записи, показывается в карточке
+let todayBusy = false; // защита от двойного нажатия «Завершить»
+let todayDateShown = dateKey(Date.now());
+
+function todayQuests() {
+  const weekday = new Date().getDay();
+  return QUESTS.filter(q => q.today && q.today.days.includes(weekday));
+}
+
+function doneToday(questId) {
+  const today = dateKey(Date.now());
+  return save.log.find(e => isActive(e) && entryType(e) === 'quest'
+    && e.questId === questId && dateKey(e.ts) === today) ?? null;
+}
+
+function clearTodayDraft() {
+  try {
+    localStorage.removeItem(DRAFT_KEY);
+  } catch (e) {
+    // не критично
+  }
+}
+
+// Активный черновик: только этого дня, этого владельца, для карточки, доступной сегодня и ещё не выполненной
+function activeDraft() {
+  let d = null;
+  try {
+    d = JSON.parse(localStorage.getItem(DRAFT_KEY));
+  } catch (e) {
+    return null;
+  }
+  if (!d) return null;
+  const valid = d.v === DRAFT_VERSION
+    && d.date === dateKey(Date.now())
+    && d.owner === save.ownerId
+    && todayQuests().some(q => q.id === d.questId)
+    && !doneToday(d.questId);
+  if (!valid) {
+    clearTodayDraft();
+    return null;
+  }
+  return d;
+}
+
+function startToday(questId) {
+  if (!todayQuests().some(q => q.id === questId) || doneToday(questId)) {
+    render();
+    return;
+  }
+  const current = activeDraft();
+  if (current && current.questId !== questId) {
+    const q = QUESTS.find(x => x.id === current.questId);
+    showMessage(`Сначала заверши или отложи «${q.name}»`);
+    return;
+  }
+  try {
+    localStorage.setItem(DRAFT_KEY, JSON.stringify({
+      v: DRAFT_VERSION, owner: save.ownerId, questId, date: dateKey(Date.now()), startedAt: Date.now(),
+    }));
+  } catch (e) {
+    showMessage('⚠️ Не удалось запомнить начало — но можно просто начать и потом нажать «Завершить»');
+  }
+  todayError = null;
+  render();
+  focusToday(questId, 'finish');
+}
+
+function laterToday(questId) {
+  const d = activeDraft();
+  if (d?.questId === questId) clearTodayDraft();
+  todayError = null;
+  render();
+  focusToday(questId, 'start');
+}
+
+async function finishToday(questId) {
+  if (todayBusy) return;
+  const d = activeDraft();
+  if (!d || d.questId !== questId) {
+    // день сменился, карточку отменили или уже выполнили в другом месте
+    render();
+    showMessage(doneToday(questId) ? 'Уже выполнено сегодня' : 'Начни карточку заново — день сменился');
+    return;
+  }
+  todayBusy = true;
+  render();
+  const result = await completeQuest(questId);
+  todayBusy = false;
+  if (result === 'saved') {
+    clearTodayDraft();
+    todayError = null;
+  } else if (result === 'error') {
+    todayError = { questId, text: 'Результат не сохранился на устройстве. Награда не начислена.' };
+  }
+  render();
+  focusToday(questId, result === 'error' ? 'finish' : null);
+}
+
+function focusToday(questId, action) {
+  const card = document.querySelector(`[data-today-card="${questId}"]`);
+  if (!card) return;
+  const target = (action && card.querySelector(`[data-today-action="${action}"]`)) || card;
+  target.focus();
+}
+
+function renderToday() {
+  const cards = todayQuests();
+  const draft = activeDraft();
+  const doneCount = cards.filter(q => doneToday(q.id)).length;
+  const dateLabel = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
+  const activeQuest = draft ? QUESTS.find(q => q.id === draft.questId) : null;
+  todayDateShown = dateKey(Date.now());
+
+  setHtml('today', html`
+    <div class="today-head">
+      <span class="today-date">${dateLabel}</span>
+      <span class="today-count">Выполнено: ${doneCount} из ${cards.length}</span>
+    </div>
+    ${cards.map(q => {
+      const stat = STATS.find(s => s.id === q.stat);
+      const gold = Math.round(q.xp * BALANCE.goldPerXp);
+      const done = doneToday(q.id);
+      const active = draft?.questId === q.id;
+      const blocked = !done && !active && Boolean(draft);
+      const error = todayError?.questId === q.id ? todayError.text : '';
+      const t = q.today;
+      const state = done ? 'done' : active ? 'active' : 'ready';
+      return html`
+        <article class="today-card ${state}" style="--c: ${stat.color}" data-today-card="${q.id}" tabindex="-1">
+          <header class="today-card-head">
+            ${iconImg(stat.icon)}
+            <h3>${q.name}</h3>
+            <span class="today-reward">+${q.xp} XP · ${goldLabel(gold)}</span>
+          </header>
+          ${done ? html`
+            <p class="today-done" role="status">✓ Выполнено · начислено +${done.xp} XP и ${goldLabel(questGold(done, BALANCE))}</p>
+          ` : html`
+            <p class="today-step"><b>${active ? 'Сейчас:' : 'Первый шаг:'}</b> ${t.firstStep}</p>
+            <p class="today-line"><b>Готово, когда:</b> ${t.done}</p>
+            ${t.example ? html`<p class="today-line"><b>Например:</b> ${t.example}</p>` : ''}
+            ${active ? html`<p class="today-hint">${t.hint}</p>` : ''}
+            ${t.note ? html`<p class="today-note">${t.note}</p>` : ''}
+            ${error ? html`<p class="today-error" role="alert">⚠️ ${error}</p>` : ''}
+            <div class="today-actions">
+              ${active ? html`
+                <button class="today-btn primary" data-today-action="finish" data-quest-id="${q.id}" ${todayBusy ? 'disabled' : ''}>
+                  ${todayBusy ? 'Сохраняю…' : error ? 'Повторить сохранение' : 'Завершить'}
+                </button>
+                <button class="today-btn" data-today-action="later" data-quest-id="${q.id}" ${todayBusy ? 'disabled' : ''}>Вернуться позже</button>
+              ` : html`
+                <button class="today-btn primary" data-today-action="start" data-quest-id="${q.id}" ${blocked ? 'disabled' : ''}>Начать</button>
+              `}
+            </div>
+            ${blocked ? html`<p class="today-note">Сначала заверши или отложи «${activeQuest.name}».</p>` : ''}
+          `}
+        </article>`;
+    })}`);
+}
+
+document.getElementById('today').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-today-action]');
+  if (!btn || btn.disabled) return;
+  const id = btn.dataset.questId;
+  const action = btn.dataset.todayAction;
+  if (action === 'start') startToday(id);
+  else if (action === 'later') laterToday(id);
+  else if (action === 'finish') finishToday(id);
+});
+
+// Смена дня при открытой вкладке: раз в 30 секунд проверяем дату
+setInterval(() => {
+  if (dateKey(Date.now()) !== todayDateShown) {
+    todayError = null;
+    render();
+  }
+}, 30 * 1000);
 
 // ===== Обработчики событий =====
 document.getElementById('quests').addEventListener('click', (e) => {

@@ -7,10 +7,11 @@
   <title>Life RPG</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body data-active="hero" data-right="shop">
+<body data-active="today" data-right="shop">
 
   <!-- Меню экранов (только на телефоне) -->
   <nav class="screen-tabs">
+    <button data-go-screen="today">Сегодня</button>
     <button data-go-screen="hero">Герой</button>
     <button data-go-screen="quests">Квесты</button>
     <button data-go-screen="shop">Магазин</button>
@@ -45,8 +46,13 @@
     </div>
 
     <!-- Центр / экран «Квесты» -->
-    <div class="col col-center screen" data-screen="quests">
-      <section class="panel">
+    <div class="col col-center">
+      <section class="panel today-panel" aria-labelledby="today-title">
+        <h2 id="today-title">Сегодня</h2>
+        <div id="today"></div>
+      </section>
+
+      <section class="panel quests-panel">
         <h2>Квесты</h2>
         <nav id="quest-tabs" class="stat-tabs"></nav>
         <div id="quests"></div>
