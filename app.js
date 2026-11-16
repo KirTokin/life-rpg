@@ -91,11 +91,26 @@ function validateConfig() {
   REWARDS.filter(r => r.minutes !== undefined).forEach(r => {
     if (!Number.isInteger(r.minutes) || r.minutes <= 0) errors.push(`Награда ${r.id}: minutes — целое > 0`);
   });
-  const rules = PLAN.versions[PLAN.rulesVersion];
-  if (!rules) errors.push('PLAN: нет правил для rulesVersion');
-  else Object.entries(rules.questDirs).forEach(([qid, dir]) => {
-    if (!questIds.has(qid)) errors.push(`PLAN: неизвестный квест ${qid}`);
-    if (!PLAN.directions[dir]) errors.push(`PLAN: неизвестное направление ${dir}`);
+  if (!PLAN.versions[PLAN.rulesVersion]) errors.push('PLAN: нет правил для rulesVersion');
+  Object.entries(PLAN.versions).forEach(([rv, rules]) => {
+    Object.entries(rules.questDirs).forEach(([qid, dir]) => {
+      if (!questIds.has(qid)) errors.push(`PLAN v${rv}: неизвестный квест ${qid}`);
+      if (!PLAN.directions[dir]) errors.push(`PLAN v${rv}: неизвестное направление ${dir}`);
+    });
+    [...Object.keys(rules.weekly), ...Object.keys(rules.weeklyVolume ?? {})].forEach(dir => {
+      if (!PLAN.directions[dir]) errors.push(`PLAN v${rv}: неизвестное недельное направление ${dir}`);
+    });
+  });
+  QUESTS.forEach(q => {
+    if (q.group && !STRENGTH_GROUPS[q.group]) errors.push(`Квест ${q.id}: неизвестная группа ${q.group}`);
+    if (q.program && PROGRAMS[q.program]?.questId !== q.id) errors.push(`Квест ${q.id}: программа ${q.program} не найдена или относится к другому квесту`);
+    if (q.gold !== undefined && !(Number.isInteger(q.gold) && q.gold >= 0)) errors.push(`Квест ${q.id}: gold — целое ≥ 0`);
+  });
+  Object.values(PROGRAMS).forEach(pr => {
+    const items = programItems(pr);
+    if (!items.some(i => i.w > 0)) errors.push(`Программа ${pr.id}: нет рабочих пунктов`);
+    if (new Set(items.map(i => i.id)).size !== items.length) errors.push(`Программа ${pr.id}: повтор id пунктов`);
+    if (!(Number.isInteger(pr.xp) && pr.xp > 0 && Number.isInteger(pr.gold) && pr.gold >= 0)) errors.push(`Программа ${pr.id}: некорректная награда`);
   });
   errors.forEach(e => console.error('Ошибка конфига:', e));
 }
@@ -103,7 +118,7 @@ validateConfig();
 
 // ===== Локальное сохранение =====
 const STORAGE_KEY = 'life-rpg-save';
-const SAVE_VERSION = 8;
+const SAVE_VERSION = 9;
 
 // Миграции сохранения. Ключ — версия, ИЗ которой мигрируем.
 // Каждая функция переводит данные ровно на одну версию вперёд.
@@ -121,6 +136,9 @@ const MIGRATIONS = {
   6: (data) => ({ ...data, version: 7 }),
   // v7 → v8: события планировщика 'plan' и метаданные выполнения квеста (payload). Данные не меняются
   7: (data) => ({ ...data, version: 8 }),
+  // v8 → v9: занятия программ (session-*), перенос карточки (pick-move), результат программы в payload.prog.
+  // Данные не меняются
+  8: (data) => ({ ...data, version: 9 }),
 };
 
 // Прогоняет сохранение через цепочку миграций до текущей версии.
@@ -269,7 +287,8 @@ function isActive(e) {
 const MINUTE = 60 * 1000;
 // Операции планировщика и пределы длины текста (объявлены до загрузки сохранения)
 const PLAN_OPS = new Set(['activate', 'project-create', 'project-set', 'project-archive',
-  'stage-add', 'stage-set', 'stage-done', 'stage-remove', 'pick-add', 'pick-remove']);
+  'stage-add', 'stage-set', 'stage-done', 'stage-remove', 'pick-add', 'pick-remove', 'pick-move',
+  'session-start', 'session-mark', 'session-close', 'session-reopen']);
 const NAME_MAX = 200;
 const NOTE_MAX = 2000;
 
@@ -280,8 +299,18 @@ function validQuestPayload(p) {
   return /^\d{4}-\d{2}-\d{2}$/.test(p.gameDay ?? '')
     && (p.rv === undefined || Number.isInteger(p.rv))
     && optStr(p.sessionId) && optStr(p.pickId) && optStr(p.projectId) && optStr(p.stageId) && optStr(p.dir)
+    && (p.prog === undefined || validProgResult(p.prog))
     && (p.names === undefined || (typeof p.names === 'object' && p.names !== null
       && optStr(p.names.project, 200) && optStr(p.names.stage, 200)));
+}
+
+// Итог занятия по программе: доля выполненных рабочих пунктов и время последней нагрузки
+function validProgResult(r) {
+  return r !== null && typeof r === 'object' && typeof r.id === 'string' && r.id.length <= 64
+    && Number.isInteger(r.done) && Number.isInteger(r.total) && r.total > 0 && r.done >= 0 && r.done <= r.total
+    && Number.isFinite(r.last) && (r.auto === undefined || typeof r.auto === 'boolean')
+    && (r.items === undefined || (Array.isArray(r.items) && r.items.length <= 100
+      && r.items.every(x => typeof x === 'string' && x.length <= 64)));
 }
 
 function isValidEntry(e) {
@@ -425,12 +454,13 @@ function evaluateCondition(cond, view) {
   let target = 0;
 
   switch (cond.type) {
+    // Частичный результат программы — XP и активный день, но не «выполненный квест»
     case 'anyQuestCount':
-      current = view.quests.length;
+      current = view.fullQuests.length;
       target = cond.count;
       break;
     case 'questCount':
-      current = view.quests.filter(e => e.questId === cond.questId).length;
+      current = view.fullQuests.filter(e => e.questId === cond.questId).length;
       target = cond.count;
       break;
     case 'heroLevel':
@@ -474,6 +504,12 @@ function fullCareDays(log) {
     byDay.get(day).add(e.taskId);
   }
   return [...byDay].filter(([, set]) => set.size === known.size).map(([day]) => day).sort();
+}
+
+// Выполнение квеста полностью: обычный квест — всегда; программа — только при 100%
+function isFullCompletion(e) {
+  const r = e.payload?.prog;
+  return !r || r.done >= r.total;
 }
 
 function computeState(log) {
@@ -530,7 +566,8 @@ function computeState(log) {
   const plan = computePlan(log, Date.now());
   gold += plan.bonusGold;
 
-  const view = { hero, stats, totalXp, quests, purchases, careFullDays: careDays.length, careDaysList: careDays, plan };
+  const fullQuests = quests.filter(isFullCompletion);
+  const view = { hero, stats, totalXp, quests, fullQuests, purchases, careFullDays: careDays.length, careDaysList: careDays, plan };
   view.achievements = ACHIEVEMENTS.map(a => {
     const result = evaluateCondition(a.condition, view);
     const claim = claims.get(a.id);
@@ -790,6 +827,8 @@ function enforceLimits(addedEntries) {
     }
   }
 
+  cancelled += enforceGroups(addedEntries);
+
   const touched = new Set();
   for (const e of addedEntries) {
     if (!isActive(e)) continue;
@@ -819,6 +858,43 @@ function enforceLimits(addedEntries) {
       e.synced = false;
       cancelled++;
       console.warn('Отменена запись сверх лимита:', describeEntry(e), new Date(e.ts).toLocaleString());
+    }
+  }
+  return cancelled;
+}
+
+// Общие группы (силовые): не больше maxPerWeek результатов за игровую неделю и отдых restHours
+// между стартом занятия и последней нагрузкой предыдущего. Только для игровых дней с даты from:
+// старые закрытые периоды не пересчитываются. Применяется и к записям старого клиента без новых
+// метаданных. Оставляются самые ранние по началу занятия; правило одинаково на всех устройствах.
+function enforceGroups(addedEntries) {
+  let cancelled = 0;
+  for (const [g, conf] of Object.entries(STRENGTH_GROUPS)) {
+    const ids = new Set(groupQuestIds(g));
+    const isGroup = e => isActive(e) && entryType(e) === 'quest' && ids.has(e.questId);
+    const inScope = e => isGroup(e) && entryGameDay(e) >= conf.from;
+    if (!addedEntries.some(inScope)) continue;
+    const sess = computeSessions(save.log);
+    const startOf = e => sess.get(e.payload?.sessionId)?.startTs ?? e.ts; // программа — старт; зал — время выполнения
+    const loadOf = e => e.payload?.prog?.last ?? e.ts;
+    const order = (a, b) => (startOf(a) - startOf(b)) || (a.id < b.id ? -1 : 1);
+    const loads = save.log.filter(e => isGroup(e) && !inScope(e)).map(loadOf); // до from: только для отдыха
+    const perWeek = new Map();
+    const restMs = conf.restHours * 3600 * 1000;
+    for (const e of save.log.filter(inScope).sort(order)) {
+      const start = startOf(e);
+      const wk = weekKeyOf(entryGameDay(e));
+      const tooSoon = loads.some(l => l <= start && start < l + restMs);
+      if (tooSoon || (perWeek.get(wk) ?? 0) >= conf.maxPerWeek) {
+        e.deleted = true;
+        e.synced = false;
+        cancelled++;
+        console.warn(tooSoon ? 'Отменено: силовая раньше окончания отдыха' : 'Отменено: силовых сверх недельной квоты',
+          describeEntry(e), new Date(e.ts).toLocaleString());
+        continue;
+      }
+      perWeek.set(wk, (perWeek.get(wk) ?? 0) + 1);
+      loads.push(loadOf(e));
     }
   }
   return cancelled;
@@ -919,6 +995,8 @@ async function sync() {
     if (syncAgain) {
       syncAgain = false;
       sync();
+    } else {
+      closeStaleSessions(); // после получения отметок с других устройств
     }
   }
 }
@@ -1033,17 +1111,36 @@ async function completeQuest(questId, meta = {}) {
     render();
     return 'limit';
   }
+  const now = Date.now();
+  const day = gameDayKey(now);
+  if (programActive(quest, day)) {
+    // Полная награда программы — только через занятие с отметками подходов
+    showMessage('Эта тренировка выполняется по подходам: открой её и нажми «Начать»');
+    render();
+    return 'limit';
+  }
+  if (quest.group && !meta.pickId) {
+    const own = picksForDay(day).find(p => p.ref.kind === 'quest' && p.ref.questId === quest.id);
+    if (own) meta = { ...meta, pickId: own.pickId }; // своя карточка на сегодня — своё место в квоте
+  }
+  const block = groupBlock(quest, now, meta.pickId);
+  if (block) {
+    showMessage(block);
+    render();
+    return 'limit';
+  }
 
   const before = getState();
-  const gold = Math.round(quest.xp * BALANCE.goldPerXp);
+  const reward = questReward(quest, day);
+  const gold = reward.gold;
   const entry = {
     id: crypto.randomUUID(),
     type: 'quest',
     questId: quest.id,
     stat: quest.stat,
-    xp: quest.xp,
+    xp: reward.xp,
     gold,
-    ts: Date.now(),
+    ts: now,
   };
   const rules = planRules();
   const payload = {
@@ -1056,7 +1153,7 @@ async function completeQuest(questId, meta = {}) {
 
   const ok = await commit(entry, before, (after) => {
     const statConf = STATS.find(s => s.id === quest.stat);
-    let msg = `${meta.label ?? quest.name} · +${quest.xp} XP, +${gold} монет`;
+    let msg = `${meta.label ?? reward.name} · +${reward.xp} XP, +${gold} монет`;
     if (after.stats[quest.stat].level > before.stats[quest.stat].level) {
       msg += ` · ${statConf.name}: ур. ${after.stats[quest.stat].level}!`;
     }
@@ -1155,6 +1252,7 @@ function describeEntry(e) {
   }
   if (type === 'plan') return `изменение плана (${e.payload?.op})`;
   if (e.payload?.names?.project) return `подход «${e.payload.names.project} › ${e.payload.names.stage}»`;
+  if (e.payload?.prog) return `результат занятия «${QUESTS.find(x => x.id === e.questId)?.name ?? e.questId}» (${e.payload.prog.done} из ${e.payload.prog.total}, +${e.xp} XP)`;
   const q = QUESTS.find(x => x.id === e.questId);
   return `квест «${q ? q.name : e.questId}»`;
 }
@@ -1166,20 +1264,30 @@ async function undoLast() {
     showMessage('Нечего отменять');
     return;
   }
-  if (!confirm(`Отменить ${describeEntry(last)}?`)) return;
+  // Результат занятия по программе в текущем игровом дне: отмена возвращает то же занятие с отметками
+  const sess = last.payload?.prog ? getSessions().get(last.payload.sessionId) : null;
+  const reopen = sess && sess.day === gameDayKey(Date.now());
+  const note = sess ? (reopen ? ' Занятие снова откроется с отметками — можно исправить и завершить заново.'
+    : ' Занятие прошлого дня не откроется для повторного заработка.') : '';
+  if (!confirm(`Отменить ${describeEntry(last)}?${note}`)) return;
   const prevSynced = last.synced;
   last.deleted = true;
   last.synced = false;
+  const reopenEntry = reopen ? { id: crypto.randomUUID(), type: 'plan', ts: Date.now(), synced: false,
+    payload: { op: 'session-reopen', sessionId: sess.id, resultId: last.id, v: 1 } } : null;
+  if (reopenEntry) save.log.push(reopenEntry);
   if (!(await storage.save(save))) {
     last.deleted = false;
     last.synced = prevSynced;
+    if (reopenEntry) save.log = save.log.filter(e => e !== reopenEntry);
     saveRevision++;
     render();
     showMessage('⚠️ Не удалось сохранить отмену. Попробуйте ещё раз.');
     return;
   }
+  if (reopen) ui.open[`today:${sess.pickId}`] = true;
   render();
-  showMessage('Последнее действие отменено');
+  showMessage(reopen ? 'Результат отменён: занятие снова открыто с прежними отметками' : 'Последнее действие отменено');
   sync();
 }
 
@@ -1313,7 +1421,32 @@ function setHtml(id, content) {
   if (!(content instanceof SafeHtml)) {
     throw new TypeError(`setHtml(${id}): ожидался результат html\`\``);
   }
-  document.getElementById(id).innerHTML = content.value;
+  const el = document.getElementById(id);
+  // Перерисовка не теряет фокус и курсор: элементы с data-fkey восстанавливаются по ключу
+  const active = document.activeElement;
+  const fkey = active && el.contains(active) ? active.dataset?.fkey : null;
+  let sel = null;
+  if (fkey) {
+    try {
+      if (typeof active.selectionStart === 'number') sel = [active.selectionStart, active.selectionEnd];
+    } catch (e) {
+      sel = null; // у number-полей выделения нет
+    }
+  }
+  el.innerHTML = content.value;
+  if (fkey) {
+    const n = el.querySelector(`[data-fkey="${CSS.escape(fkey)}"]`);
+    if (n) {
+      n.focus({ preventScroll: true });
+      if (sel) {
+        try {
+          n.setSelectionRange(...sel);
+        } catch (e) {
+          // не текстовое поле
+        }
+      }
+    }
+  }
 }
 
 function renderBar(current, max) {
@@ -1428,6 +1561,7 @@ function render() {
     })}`);
   document.querySelectorAll('.ach-badge').forEach(el => { el.textContent = view.readyCount || ''; });
   renderToday();
+  scheduleRestTimer();
   renderCare(health, view);
   renderLeisure(view, health);
   updatePendingBadge();
@@ -1561,11 +1695,15 @@ db.auth.onAuthStateChange((event, session) => {
     return;
   }
 
-  if (event === 'SIGNED_OUT') clearTodayDraft(); // незавершённое действие не переживает выход
+  if (event === 'SIGNED_OUT') {
+    clearTodayDraft(); // незавершённое действие не переживает выход
+    markDrafts.clear();
+  }
   currentUser = user;
   if (!currentUser) syncStatus = '';
   renderAuth();
   if (currentUser && isLogin) setTimeout(sync, 0);
+  else if (event === 'INITIAL_SESSION') setTimeout(closeStaleSessions, 0); // без входа — по локальным данным
 });
 
 // ===== Раскладка: экраны и вкладки =====
@@ -1573,7 +1711,7 @@ db.auth.onAuthStateChange((event, session) => {
 const UI_KEY = 'life-rpg-ui';
 const UI_VERSION = 2; // v2: появился экран «Сегодня», он открывается первым
 const SCREENS = ['today', 'hero', 'quests', 'shop', 'achievements'];
-const ui = { v: UI_VERSION, screen: 'today', right: 'shop', questStat: STATS[0].id, folds: {} };
+const ui = { v: UI_VERSION, screen: 'today', right: 'shop', questStat: STATS[0].id, folds: {}, open: {} };
 try {
   const stored = JSON.parse(localStorage.getItem(UI_KEY)) || {};
   if (stored.v === UI_VERSION) Object.assign(ui, stored);
@@ -1583,6 +1721,7 @@ try {
 }
 if (!SCREENS.includes(ui.screen)) ui.screen = 'today';
 if (!ui.folds || typeof ui.folds !== 'object') ui.folds = {};
+if (!ui.open || typeof ui.open !== 'object') ui.open = {}; // раскрытые карточки заданий
 
 // Сворачиваемые подблоки «Сегодня»: шапка видна всегда, тело скрывается. По умолчанию раскрыты.
 function isFoldOpen(id) {
@@ -2326,8 +2465,16 @@ function planRules(rv = PLAN.rulesVersion) {
   return PLAN.versions[rv];
 }
 
+// Направление выполнения — по правилам версии, действующей в его период, и виду квеста.
+// payload.dir старого клиента не используется: иначе старая запись обошла бы новые нормы.
 function questDir(e, rules) {
-  return e.payload?.dir ?? rules.questDirs[e.questId] ?? null;
+  return rules.questDirs[e.questId] ?? null;
+}
+
+// Вклад выполнения в недельный объём: программа — доля выполненных рабочих пунктов, иначе 1
+function volumeUnits(e) {
+  const r = e.payload?.prog;
+  return r ? r.done / r.total : 1;
 }
 
 function planEvents(log) {
@@ -2340,80 +2487,148 @@ function findActivation(log) {
   return planEvents(log).find(e => e.payload.op === 'activate' && e.payload.rv === PLAN.rulesVersion) ?? null;
 }
 
+// Активации всех известных версий: самая ранняя по каждой версии (одинаковая версия с двух устройств —
+// одна активация). Дневные правила версии — со следующего игрового дня после активации, недельные —
+// с первого понедельника после неё (но не раньше weeklyNotBefore).
+// Период подчиняется версии с наибольшим номером среди начавшихся к нему: интервалы не пересекаются,
+// старые правила действуют до начала новых — без разрыва и двойного счёта.
+function planActivations(log) {
+  const first = new Map();
+  for (const e of planEvents(log)) {
+    const p = e.payload;
+    if (p.op === 'activate' && PLAN.versions[p.rv] && !first.has(p.rv)) first.set(p.rv, e);
+  }
+  return [...first].sort((x, y) => x[0] - y[0]).map(([rv, e]) => {
+    const rules = PLAN.versions[rv];
+    const day = gameDayKey(e.ts);
+    let weekFrom = addDays(weekKeyOf(day), 7);
+    if (rules.weeklyNotBefore) {
+      const nb = weekKeyOf(addDays(rules.weeklyNotBefore, 6)); // ближайший понедельник не раньше даты
+      if (weekFrom < nb) weekFrom = nb;
+    }
+    return { rv, rules, entry: e, day, dayFrom: addDays(day, 1), weekFrom };
+  });
+}
+
+function versionAt(acts, key, field) {
+  let best = null;
+  for (const a of acts) if (a[field] <= key && (!best || a.rv > best.rv)) best = a;
+  return best;
+}
+
 function requiredDaily(dayKey, rules) {
   return rules.workdays.includes(weekdayOf(dayKey)) ? rules.daily.workday : rules.daily.weekend;
 }
 
+// Состояние недели по правилам её версии: направления «разных дней» и «объёма»
+function weekStatus(w, rules, questsByDay, today) {
+  const status = {};
+  const days = [];
+  for (let k = 0; k < 7; k++) {
+    const d = addDays(w, k);
+    if (d > today) break;
+    days.push(d);
+  }
+  for (const [dir, need] of Object.entries(rules.weekly)) {
+    const have = days.filter(d => (questsByDay.get(d) ?? []).some(e => questDir(e, rules) === dir)).length;
+    status[dir] = { kind: 'days', have, need, ok: have >= need };
+  }
+  for (const [dir, need] of Object.entries(rules.weeklyVolume ?? {})) {
+    let have = 0;
+    for (const d of days) for (const e of questsByDay.get(d) ?? []) if (questDir(e, rules) === dir) have += volumeUnits(e);
+    status[dir] = { kind: 'volume', have, need, ok: have >= need - 1e-9 };
+  }
+  return status;
+}
+
 // Минимумы, бонусы и поправки к переходному запасу. Не обращается к getState: без циклов gold → plan → leisure → gold.
+// Каждый день и неделя считаются по версии правил, действовавшей в этот период.
 function computePlan(log, now) {
   const today = gameDayKey(now);
-  const rules = planRules();
-  const act = findActivation(log);
-  const empty = {
-    active: false, today, firstDay: null, firstWeek: null, rules,
-    dirsByDay: new Map(), bonusDays: new Set(), bonusWeeks: new Set(), bonusGold: 0,
-    dailyMissed: new Map(), weeklyMissed: new Map(), weeks: new Map(),
-  };
-  // Выполненные направления по игровым дням (нужны и до активации — для подсказок)
-  const dirsByDay = new Map();
+  const acts = planActivations(log);
+  const curDay = versionAt(acts, today, 'dayFrom');
+  const curWeek = versionAt(acts, weekKeyOf(today), 'weekFrom');
+  const latest = acts[acts.length - 1] ?? null;
+  const rules = (curDay ?? latest)?.rules ?? planRules();
+  const weekRules = (curWeek ?? curDay ?? latest)?.rules ?? rules;
+
+  const questsByDay = new Map();
   for (const e of log) {
     if (!isActive(e) || entryType(e) !== 'quest') continue;
-    const dir = questDir(e, rules);
-    if (!dir) continue;
     const d = entryGameDay(e);
-    if (!dirsByDay.has(d)) dirsByDay.set(d, new Set());
-    dirsByDay.get(d).add(dir);
+    if (!questsByDay.has(d)) questsByDay.set(d, []);
+    questsByDay.get(d).push(e);
   }
-  empty.dirsByDay = dirsByDay;
-  if (!act) return empty;
+  const dirsOn = (d, r) => new Set((questsByDay.get(d) ?? []).map(e => questDir(e, r)).filter(Boolean));
+  // Выполненные направления по дням — по текущим правилам (для подсказок «Сегодня»)
+  const dirsByDay = new Map();
+  for (const d of questsByDay.keys()) dirsByDay.set(d, dirsOn(d, rules));
 
-  const actDay = gameDayKey(act.ts);
-  const firstDay = addDays(actDay, 1);              // ознакомительный день не обязателен
-  const firstWeek = addDays(weekKeyOf(actDay), 7);  // первый понедельник после дня активации
+  const empty = {
+    active: false, today, firstDay: null, firstWeek: null, rules, weekRules, acts, questsByDay,
+    dirsByDay, bonusDays: new Set(), bonusWeeks: new Set(), bonusGold: 0,
+    dailyMissed: new Map(), weeklyMissed: new Map(), dayMissRules: new Map(), weekMissRules: new Map(), weeks: new Map(),
+  };
+  if (!acts.length) return empty;
+
+  const firstDay = acts.reduce((m, a) => a.dayFrom < m ? a.dayFrom : m, acts[0].dayFrom);
+  const firstWeek = acts.reduce((m, a) => a.weekFrom < m ? a.weekFrom : m, acts[0].weekFrom);
+  let bonusGold = 0;
   const bonusDays = new Set();
   const dailyMissed = new Map(); // день → невыполненные направления (для дней до сегодня)
+  const dayMissRules = new Map();
   for (let d = firstDay; d <= today; d = addDays(d, 1)) {
-    const done = dirsByDay.get(d) ?? new Set();
-    const missing = requiredDaily(d, rules).filter(x => !done.has(x));
-    if (!missing.length) bonusDays.add(d);
-    else if (d < today) dailyMissed.set(d, missing);
+    const v = versionAt(acts, d, 'dayFrom');
+    if (!v) continue;
+    const done = dirsOn(d, v.rules);
+    const missing = requiredDaily(d, v.rules).filter(x => !done.has(x));
+    if (!missing.length) {
+      bonusDays.add(d);
+      bonusGold += v.rules.dayBonus;
+    } else if (d < today) {
+      dailyMissed.set(d, missing);
+      dayMissRules.set(d, v.rules);
+    }
   }
 
   const bonusWeeks = new Set();
   const weeklyMissed = new Map(); // понедельник, к которому применяется поправка → невыполненные
+  const weekMissRules = new Map(); // правила завершившейся недели, по которым считается поправка
   const weeks = new Map();
   for (let w = firstWeek; w <= today; w = addDays(w, 7)) {
-    const status = {};
-    for (const [dir, need] of Object.entries(rules.weekly)) {
-      let days = 0;
-      for (let k = 0; k < 7; k++) {
-        const d = addDays(w, k);
-        if (d > today) break;
-        if (dirsByDay.get(d)?.has(dir)) days++;
-      }
-      status[dir] = { days, need };
-    }
+    const v = versionAt(acts, w, 'weekFrom');
+    if (!v) continue;
+    const status = weekStatus(w, v.rules, questsByDay, today);
     weeks.set(w, status);
-    const missing = Object.entries(status).filter(([, s]) => s.days < s.need).map(([dir]) => dir);
-    if (!missing.length) bonusWeeks.add(w);
-    else if (addDays(w, 7) <= today) weeklyMissed.set(addDays(w, 7), missing);
+    const missing = Object.entries(status).filter(([, st]) => !st.ok).map(([dir]) => dir);
+    if (!missing.length) {
+      bonusWeeks.add(w);
+      bonusGold += v.rules.weekBonus;
+    } else if (addDays(w, 7) <= today) {
+      weeklyMissed.set(addDays(w, 7), missing);
+      weekMissRules.set(addDays(w, 7), v.rules);
+    }
   }
 
   return {
-    ...empty, active: true, activation: act, actDay, firstDay, firstWeek, dirsByDay,
-    bonusDays, bonusWeeks, dailyMissed, weeklyMissed, weeks,
-    bonusGold: bonusDays.size * rules.dayBonus + bonusWeeks.size * rules.weekBonus,
+    ...empty, active: true, activation: latest.entry, actDay: latest.day, firstDay, firstWeek,
+    dayActive: Boolean(curDay), weekActive: Boolean(curWeek), weekRulesFrom: curWeek?.weekFrom ?? null,
+    nextWeekRules: acts.filter(a => a.weekFrom > weekKeyOf(today)).sort((x, y) => x.weekFrom < y.weekFrom ? -1 : 1)[0] ?? null,
+    bonusDays, bonusWeeks, dailyMissed, weeklyMissed, dayMissRules, weekMissRules, weeks, bonusGold,
   };
 }
 
-// Поправка к переходному запасу развлечений для игрового дня
+// Поправка к переходному запасу развлечений для игрового дня.
+// Размер определяют правила того дня/недели, за которые она начислена, а не текущие.
 function planPenalty(plan, dayKey) {
-  const r = plan.rules;
-  const dMiss = plan.dailyMissed.get(addDays(dayKey, -1)) ?? [];
+  const prev = addDays(dayKey, -1);
+  const dMiss = plan.dailyMissed.get(prev) ?? [];
   const wMiss = plan.weeklyMissed.get(dayKey) ?? [];
-  const daily = Math.min(r.dailyPenaltyMax, dMiss.length * r.dailyPenalty);
-  const weekly = Math.min(r.weeklyPenaltyMax, wMiss.length * r.weeklyPenalty);
-  return { daily, weekly, total: Math.min(r.totalPenaltyMax, daily + weekly), dMiss, wMiss };
+  const rd = plan.dayMissRules?.get(prev) ?? plan.rules;
+  const rw = plan.weekMissRules?.get(dayKey) ?? plan.rules;
+  const daily = Math.min(rd.dailyPenaltyMax, dMiss.length * rd.dailyPenalty);
+  const weekly = Math.min(rw.weeklyPenaltyMax, wMiss.length * rw.weeklyPenalty);
+  return { daily, weekly, total: Math.min(rd.totalPenaltyMax, rw.totalPenaltyMax, daily + weekly), dMiss, wMiss };
 }
 
 let planCache = { key: null, value: null };
@@ -2428,6 +2643,16 @@ function getPlan() {
 
 function validName(v) {
   return typeof v === 'string' && v.trim().length > 0 && v.length <= NAME_MAX;
+}
+
+// Снимок программы в начале занятия: пункты с весами и полная награда
+function validProgSnapshot(pr) {
+  if (!pr || typeof pr !== 'object' || typeof pr.id !== 'string' || pr.id.length > 64) return false;
+  if (!Number.isInteger(pr.version) || !Number.isInteger(pr.xp) || pr.xp <= 0 || !Number.isInteger(pr.gold) || pr.gold < 0) return false;
+  if (!Array.isArray(pr.items) || !pr.items.length || pr.items.length > 100) return false;
+  const ok = pr.items.every(i => i && typeof i.id === 'string' && i.id.length > 0 && i.id.length <= 64
+    && Number.isInteger(i.w) && i.w >= 0 && i.w <= 100);
+  return ok && pr.items.some(i => i.w > 0);
 }
 
 function validPlanPayload(p) {
@@ -2454,6 +2679,18 @@ function validPlanPayload(p) {
         (p.ref.kind === 'quest' && id(p.ref.questId))
         || (p.ref.kind === 'stage' && id(p.ref.projectId) && id(p.ref.stageId)));
     case 'pick-remove': return id(p.pickId);
+    case 'pick-move': return id(p.pickId) && /^\d{4}-\d{2}-\d{2}$/.test(p.day);
+    case 'session-start':
+      return id(p.sessionId) && id(p.questId) && /^\d{4}-\d{2}-\d{2}$/.test(p.day)
+        && (p.pickId === undefined || id(p.pickId)) && validProgSnapshot(p.prog);
+    case 'session-mark': {
+      const int = v => v === undefined || (Number.isInteger(v) && v >= 0 && v <= 999);
+      return id(p.sessionId) && id(p.itemId) && typeof p.done === 'boolean' && int(p.reps) && int(p.reps2)
+        && (p.kg === undefined || (Number.isFinite(p.kg) && p.kg >= 0 && p.kg <= 500))
+        && (p.variant === undefined || (typeof p.variant === 'string' && p.variant.length <= 80));
+    }
+    case 'session-close': return id(p.sessionId) && (p.reason === 'empty' || p.reason === 'auto');
+    case 'session-reopen': return id(p.sessionId) && id(p.resultId);
     default: return false;
   }
 }
@@ -2506,16 +2743,40 @@ function refKey(ref) {
   return ref.kind === 'quest' ? `quest:${ref.questId}` : `stage:${ref.stageId}`;
 }
 
+// Все карточки плана (не убранные) с действующей датой: перенос (pick-move) сохраняет id карточки,
+// при нескольких переносах побеждает последний по (ts, id). Повтор создания одного id — один раз.
+function computePicks(log) {
+  const evs = planEvents(log);
+  const removed = new Set();
+  const moves = new Map();
+  for (const e of evs) {
+    if (e.payload.op === 'pick-remove') removed.add(e.payload.pickId);
+    else if (e.payload.op === 'pick-move') moves.set(e.payload.pickId, e.payload.day);
+  }
+  const seen = new Set();
+  const list = [];
+  for (const e of evs) {
+    const p = e.payload;
+    if (p.op !== 'pick-add' || removed.has(p.pickId) || seen.has(p.pickId)) continue;
+    seen.add(p.pickId);
+    list.push({ pickId: p.pickId, ref: p.ref, ts: e.ts, day: moves.get(p.pickId) ?? p.day });
+  }
+  return list;
+}
+
+let picksCache = { revision: -1, value: null };
+function allPicks() {
+  if (picksCache.revision !== saveRevision) picksCache = { revision: saveRevision, value: computePicks(save.log) };
+  return picksCache.value;
+}
+
 // Карточки плана на день: ссылки на квест или этап. Одна карточка на квест/этап; самая ранняя побеждает.
 function picksForDay(dayKey) {
-  const evs = planEvents(save.log);
-  const removed = new Set(evs.filter(e => e.payload.op === 'pick-remove').map(e => e.payload.pickId));
   const projects = getProjects();
   const seen = new Set();
   const picks = [];
-  for (const e of evs) {
-    const p = e.payload;
-    if (p.op !== 'pick-add' || p.day !== dayKey || removed.has(p.pickId)) continue;
+  for (const p of allPicks()) {
+    if (p.day !== dayKey) continue;
     const k = refKey(p.ref);
     if (seen.has(k)) continue;
     if (p.ref.kind === 'quest' && !QUESTS.some(q => q.id === p.ref.questId)) continue;
@@ -2525,7 +2786,7 @@ function picksForDay(dayKey) {
       if (!proj || proj.archived || !st || st.removed) continue; // архив и удаление убирают из плана
     }
     seen.add(k);
-    picks.push({ pickId: p.pickId, ref: p.ref, ts: e.ts });
+    picks.push(p);
   }
   return picks;
 }
@@ -2720,12 +2981,27 @@ async function addPick(ref, day = gameDayKey(Date.now())) {
     showMessage('Уже в плане на сегодня');
     return false;
   }
+  const block = ref.kind === 'quest' ? groupPlanBlock(ref.questId, day) : null;
+  if (block) {
+    showMessage(block);
+    return false;
+  }
   return writePlanEvent({ op: 'pick-add', pickId: crypto.randomUUID(), day, ref }, 'Добавлено в план на сегодня');
 }
 
 async function removePick(pickId) {
   const d = activeDraft();
   if (d?.pickId === pickId) clearTodayDraft();
+  const s = sessionOfPick(pickId);
+  if (s?.status === 'open' && s.day === gameDayKey(Date.now())) {
+    if (s.doneW > 0) {
+      showMessage('В занятии уже отмечены подходы: продолжи или заверши частично — результат сохранится');
+      return false;
+    }
+    // Начатое без рабочих подходов: закрыть без результата и убрать карточку
+    return writePlanEvents([{ op: 'session-close', sessionId: s.id, reason: 'empty' }, { op: 'pick-remove', pickId }],
+      'Убрано из плана. Место на неделе свободно');
+  }
   return writePlanEvent({ op: 'pick-remove', pickId }, 'Убрано из плана. Выполненное остаётся в истории');
 }
 
@@ -2738,6 +3014,736 @@ async function setStageDone(projectId, stageId, done) {
     const p = getProjects().get(projectId);
     showMessage(done ? `Этап завершён · ${p.doneCount} из ${p.list.length}` : `Этап снова в работе · ${p.doneCount} из ${p.list.length}`);
   }
+}
+
+// ===== Программы и силовые занятия =====
+// Шаблон квеста → карточка плана (pick) → экземпляр занятия (sessionId). Отметки принадлежат экземпляру.
+// Состояние экземпляра — свёртка добавляемых событий 'plan' (session-start/mark/close/reopen)
+// и итоговой записи 'quest' с payload.prog. Синхронизация только добавляет события, поэтому
+// отметки с разных устройств объединяются, а повтор доставки ничего не меняет.
+
+function programItems(pr) {
+  const items = [{ id: 'prep', w: 0 }];
+  for (const ex of pr.exercises) for (let k = 1; k <= pr.sets; k++) items.push({ id: `${ex.id}-${k}`, w: 1 });
+  return items;
+}
+
+function programSnapshot(pr) {
+  return { id: pr.id, version: pr.version, xp: pr.xp, gold: pr.gold, items: programItems(pr) };
+}
+
+// Награда по доле: XP и золото округляются вниз независимо, из целых весов
+function progReward(prog, doneW) {
+  const total = prog.items.reduce((t, i) => t + i.w, 0);
+  return { done: doneW, total, xp: Math.floor(prog.xp * doneW / total), gold: Math.floor(prog.gold * doneW / total),
+    pct: Math.floor(100 * doneW / total) };
+}
+
+function groupQuestIds(g) {
+  return QUESTS.filter(q => q.group === g).map(q => q.id);
+}
+
+function groupFrom(quest) {
+  return quest.group ? STRENGTH_GROUPS[quest.group].from : null;
+}
+
+// Программа квеста действует (наградный старт) в этот игровой день
+function programActive(quest, dayKey) {
+  return Boolean(quest.program) && dayKey >= (quest.legacy?.until ?? '0000-00-00');
+}
+
+// Награда и название квеста на игровой день: до перехода — прежний формат
+function questReward(quest, dayKey) {
+  if (quest.legacy && dayKey < quest.legacy.until) {
+    return { xp: quest.legacy.xp, gold: Math.round(quest.legacy.xp * BALANCE.goldPerXp), name: quest.legacy.name, legacy: true };
+  }
+  return { xp: quest.xp, gold: quest.gold ?? Math.round(quest.xp * BALANCE.goldPerXp), name: quest.name, legacy: false };
+}
+
+function computeSessions(log) {
+  const evs = planEvents(log);
+  const map = new Map();
+  for (const e of evs) {
+    const p = e.payload;
+    if (p.op !== 'session-start' || map.has(p.sessionId)) continue; // дубль создания — самый ранний
+    map.set(p.sessionId, { id: p.sessionId, questId: p.questId, pickId: p.pickId ?? null, day: p.day, startTs: e.ts,
+      prog: p.prog, marks: new Map(), closeEmpty: null, reopenTs: 0, results: [], deleted: [] });
+  }
+  for (const e of evs) {
+    const p = e.payload;
+    const s = map.get(p.sessionId);
+    if (!s) continue;
+    if (p.op === 'session-mark') {
+      // После 04:00 отметки прошлого дня не меняются (в том числе с другого устройства)
+      if (gameDayKey(e.ts) !== s.day) continue;
+      s.marks.set(p.itemId, { ...p, ts: e.ts }); // события по (ts, id): побеждает последнее
+    } else if (p.op === 'session-close') {
+      if (!s.closeEmpty) s.closeEmpty = e;
+    } else if (p.op === 'session-reopen') {
+      s.reopenTs = Math.max(s.reopenTs, e.ts);
+    }
+  }
+  for (const e of log) {
+    if (entryType(e) !== 'quest') continue;
+    const s = map.get(e.payload?.sessionId);
+    if (s) (e.deleted ? s.deleted : s.results).push(e);
+  }
+  for (const s of map.values()) {
+    s.results.sort((a, b) => (a.ts - b.ts) || (a.id < b.id ? -1 : 1));
+    s.result = s.results[0] ?? null; // одновременные завершения: канонический — самый ранний
+    const weight = new Map(s.prog.items.map(i => [i.id, i.w]));
+    s.doneItems = s.prog.items.filter(i => s.marks.get(i.id)?.done).map(i => i.id);
+    s.doneW = s.doneItems.reduce((t, id) => t + weight.get(id), 0);
+    s.lastWork = Math.max(0, ...s.doneItems.filter(id => weight.get(id) > 0).map(id => s.marks.get(id).ts));
+    const lastDeleted = Math.max(0, ...s.deleted.map(e => e.ts));
+    s.status = s.result ? 'done'
+      : s.closeEmpty ? 'empty'
+      : s.deleted.length && s.reopenTs <= lastDeleted ? 'cancelled' // отменён без права заново заработать
+      : 'open';
+  }
+  return map;
+}
+
+let sessionsCache = { revision: -1, value: null };
+function getSessions() {
+  if (sessionsCache.revision !== saveRevision) sessionsCache = { revision: saveRevision, value: computeSessions(save.log) };
+  return sessionsCache.value;
+}
+
+// Открытое занятие квеста за игровой день
+function openSession(questId, dayKey) {
+  return [...getSessions().values()].find(s => s.questId === questId && s.status === 'open' && s.day === dayKey) ?? null;
+}
+
+function sessionOfPick(pickId) {
+  const list = [...getSessions().values()].filter(s => s.pickId === pickId);
+  return list.find(s => s.status === 'open') ?? list.find(s => s.status === 'done') ?? list[list.length - 1] ?? null;
+}
+
+// Последняя нагрузка группы: последняя отметка рабочего подхода; у зала и старых записей — время выполнения
+function groupLastLoad(g) {
+  const ids = new Set(groupQuestIds(g));
+  let last = 0;
+  for (const e of save.log) {
+    if (isActive(e) && entryType(e) === 'quest' && ids.has(e.questId)) last = Math.max(last, e.payload?.prog?.last ?? e.ts);
+  }
+  for (const s of getSessions().values()) if (ids.has(s.questId) && s.lastWork) last = Math.max(last, s.lastWork);
+  return last;
+}
+
+function groupNextAt(g) {
+  const last = groupLastLoad(g);
+  return last ? last + STRENGTH_GROUPS[g].restHours * 3600 * 1000 : 0;
+}
+
+// Места недели: завершённые (любой результат > 0) + начатые + запланированные на сегодня и позже.
+// Пустые прошедшие резервы не держат место. Объём — сумма вкладов результатов.
+function groupWeek(g, weekKey, now = Date.now()) {
+  const conf = STRENGTH_GROUPS[g];
+  const today = gameDayKey(now);
+  const ids = new Set(groupQuestIds(g));
+  const inWeek = d => weekKeyOf(d) === weekKey && d >= conf.from;
+  const results = save.log.filter(e => isActive(e) && entryType(e) === 'quest' && ids.has(e.questId) && inWeek(entryGameDay(e)));
+  const sessions = [...getSessions().values()].filter(s => ids.has(s.questId));
+  const open = sessions.filter(s => s.status === 'open' && inWeek(s.day) && (s.day === today || s.doneW > 0));
+  const takenPicks = new Set([...results.map(e => e.payload?.pickId),
+    ...sessions.filter(s => s.status === 'open' || s.status === 'done').map(s => s.pickId)].filter(Boolean));
+  const reserved = allPicks().filter(p => p.ref.kind === 'quest' && ids.has(p.ref.questId) && inWeek(p.day)
+    && p.day >= today && !takenPicks.has(p.pickId))
+    .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.ts - b.ts));
+  const volume = results.reduce((t, e) => t + volumeUnits(e), 0);
+  return { weekKey, results, open, reserved, used: results.length, slots: results.length + open.length + reserved.length,
+    max: conf.maxPerWeek, volume };
+}
+
+function fmtVol(v) {
+  return String(Math.round(v * 100) / 100).replace('.', ',');
+}
+
+function fmtWhen(t) {
+  return new Date(t).toLocaleString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' });
+}
+
+// Почему нельзя начать/выполнить силовую сейчас (null — можно). ownPickId — своя карточка на сегодня.
+function groupBlock(quest, now, ownPickId = null) {
+  if (!quest.group) return null;
+  const conf = STRENGTH_GROUPS[quest.group];
+  const today = gameDayKey(now);
+  if (today < conf.from) return null; // до запуска — прежние правила
+  const nextAt = groupNextAt(quest.group);
+  if (now < nextAt) return `Отдых после прошлой нагрузки: следующая силовая — с ${fmtWhen(nextAt)}`;
+  const wk = groupWeek(quest.group, weekKeyOf(today), now);
+  const ownReserved = ownPickId && wk.reserved.some(p => p.pickId === ownPickId);
+  if (!ownReserved && wk.slots >= wk.max) {
+    return wk.reserved.length
+      ? `На этой неделе уже ${wk.max} силовых с учётом запланированных. Перенеси или убери запланированную, чтобы освободить место`
+      : `На этой неделе уже ${wk.max} силовых — следующая с понедельника`;
+  }
+  return null;
+}
+
+// Можно ли поставить карточку силового квеста на день (квота недели этого дня)
+function groupPlanBlock(questId, day, excludePickId = null, now = Date.now()) {
+  const q = QUESTS.find(x => x.id === questId);
+  if (!q?.group) return null;
+  const conf = STRENGTH_GROUPS[q.group];
+  if (day < conf.from) return null;
+  const wk = groupWeek(q.group, weekKeyOf(day), now);
+  const own = excludePickId && wk.reserved.some(p => p.pickId === excludePickId) ? 1 : 0;
+  if (wk.slots - own >= wk.max) {
+    return `На неделе с ${fmtDay(weekKeyOf(day))} уже ${wk.max} силовых (выполненные, начатые и запланированные). Сначала перенеси или убери одну из них`;
+  }
+  return null;
+}
+
+// ===== Действия занятия =====
+let progBusy = false;
+const markDrafts = new Map(); // введённое, но ещё не сохранённое в полях повторов/веса (по data-fkey)
+
+function planEntry(payload, ts = Date.now()) {
+  return { id: crypto.randomUUID(), type: 'plan', payload: { ...payload, v: 1 }, ts, synced: false };
+}
+
+async function startProgram(questId, pickId = null) {
+  if (progBusy) return false;
+  absorbDisk();
+  await closeStaleSessions();
+  const quest = QUESTS.find(q => q.id === questId);
+  const pr = PROGRAMS[quest?.program];
+  if (!pr) return false;
+  const now = Date.now();
+  const today = gameDayKey(now);
+  const current = openSession(questId, today);
+  if (current) {
+    ui.open[`today:${current.pickId}`] = true;
+    ui.open[`cat:${questId}`] = true;
+    saveUi();
+    render();
+    showMessage('Занятие уже идёт — продолжай с сохранёнными отметками');
+    return true;
+  }
+  if (!programActive(quest, today)) {
+    showMessage(`Наградный старт программы — с ${fmtDay(quest.legacy.until)}. Изучить её можно уже сейчас`);
+    return false;
+  }
+  if (questLeft(quest) <= 0) {
+    showMessage('Сегодня это занятие уже завершено');
+    return false;
+  }
+  const todayPick = picksForDay(today).find(p => p.ref.kind === 'quest' && p.ref.questId === questId);
+  const own = pickId ?? todayPick?.pickId ?? null;
+  const block = groupBlock(quest, now, own);
+  if (block) {
+    showMessage(block);
+    return false;
+  }
+  const sessionId = crypto.randomUUID();
+  const payloads = [];
+  let pid = own;
+  if (!pid) {
+    pid = crypto.randomUUID();
+    payloads.push({ op: 'pick-add', pickId: pid, day: today, ref: { kind: 'quest', questId } });
+  }
+  payloads.push({ op: 'session-start', sessionId, questId, pickId: pid, day: today, prog: programSnapshot(pr) });
+  ui.open[`today:${pid}`] = true;
+  ui.open[`cat:${questId}`] = true;
+  saveUi();
+  progBusy = true;
+  const ok = await writePlanEvents(payloads, 'Занятие начато. Отметки подходов сохраняются сразу');
+  progBusy = false;
+  render();
+  return ok;
+}
+
+// Отметка пункта: выполнено + необязательные повторы/вес/вариант. Одно добавляемое событие.
+async function markItem(sessionId, itemId, values) {
+  const s = getSessions().get(sessionId);
+  const today = gameDayKey(Date.now());
+  if (!s || s.status !== 'open' || s.day !== today) {
+    render();
+    showMessage(s && s.day !== today ? 'Отметки прошлого дня уже закрыты' : 'Занятие уже завершено');
+    return false;
+  }
+  const prev = s.marks.get(itemId) ?? {};
+  const payload = { op: 'session-mark', sessionId, itemId, done: values.done ?? prev.done ?? false };
+  for (const k of ['reps', 'reps2', 'kg', 'variant']) {
+    const v = k in values ? values[k] : prev[k];
+    if (v !== undefined && v !== null && v !== '') payload[k] = v;
+  }
+  const entry = planEntry(payload);
+  if (!validPlanPayload(entry.payload)) {
+    render();
+    showMessage('⚠️ Некорректное значение: повторы — целое 0–999, вес — 0–500 кг');
+    return false;
+  }
+  save.log.push(entry);
+  if (!(await storage.save(save))) {
+    save.log = save.log.filter(e => e !== entry);
+    saveRevision++;
+    render();
+    showMessage('⚠️ Отметка не сохранилась на устройстве. Попробуйте ещё раз.');
+    return false;
+  }
+  render();
+  sync();
+  return true;
+}
+
+function programResultEntry(s, auto) {
+  const r = progReward(s.prog, s.doneW);
+  const quest = QUESTS.find(q => q.id === s.questId);
+  const payload = {
+    gameDay: s.day, rv: PLAN.rulesVersion, sessionId: s.id,
+    prog: { id: s.prog.id, done: r.done, total: r.total, last: s.lastWork, items: s.doneItems },
+  };
+  if (s.pickId) payload.pickId = s.pickId;
+  if (auto) payload.prog.auto = true;
+  // Автозакрытие: время — последняя нагрузка (не время запуска приложения), но позже повторного открытия
+  const ts = auto ? Math.max(s.lastWork, s.reopenTs + 1) : Date.now();
+  return { id: crypto.randomUUID(), type: 'quest', questId: s.questId, stat: quest?.stat ?? 'strength', xp: r.xp, gold: r.gold, ts, payload };
+}
+
+function progDoneMessage(s, r) {
+  const q = QUESTS.find(x => x.id === s.questId);
+  const nextAt = q?.group ? groupNextAt(q.group) : 0;
+  const next = nextAt ? ` Следующая силовая — с ${fmtWhen(nextAt)}.` : '';
+  const wk = q?.group ? groupWeek(q.group, weekKeyOf(s.day)) : null;
+  const vol = wk ? ` Объём недели: ${fmtVol(wk.volume)} из ${planRules().weeklyVolume?.strength ?? 2}.` : '';
+  return r.done >= r.total
+    ? `Все ${r.total} подходов выполнены: +${r.xp} XP, +${r.gold} монет.${vol}${next}`
+    : `Сделано ${r.done} из ${r.total} подходов. Результат сохранён: +${r.xp} XP, +${r.gold} монет.${vol}${next}`;
+}
+
+async function finishProgram(sessionId) {
+  if (progBusy) return;
+  absorbDisk();
+  const s = getSessions().get(sessionId);
+  const today = gameDayKey(Date.now());
+  if (!s || s.status !== 'open') {
+    render();
+    showMessage('Это занятие уже завершено');
+    return;
+  }
+  if (s.day !== today) {
+    await closeStaleSessions();
+    return;
+  }
+  const r = progReward(s.prog, s.doneW);
+  if (r.xp <= 0) {
+    showMessage('Нет отмеченных рабочих подходов. Можно закрыть занятие без результата');
+    return;
+  }
+  progBusy = true;
+  render();
+  const before = getState();
+  const entry = programResultEntry(s, false);
+  const ok = await commit(entry, before, () => progDoneMessage(getSessions().get(sessionId) ?? s, r));
+  progBusy = false;
+  if (ok) {
+    markDrafts.clear();
+    ui.open[`today:${s.pickId}`] = false;
+    saveUi();
+  }
+  render();
+}
+
+// Закрыть без рабочих подходов: без награды, место недели освобождается, карточка убирается
+async function closeEmptyProgram(sessionId) {
+  const s = getSessions().get(sessionId);
+  if (!s || s.status !== 'open') return;
+  if (s.doneW > 0) {
+    showMessage('Подходы уже отмечены — заверши занятие частично');
+    return;
+  }
+  if (!confirm('Закрыть занятие без результата? Награды не будет, место на неделе освободится.')) return;
+  const payloads = [{ op: 'session-close', sessionId, reason: 'empty' }];
+  if (s.pickId && allPicks().some(p => p.pickId === s.pickId)) payloads.push({ op: 'pick-remove', pickId: s.pickId });
+  await writePlanEvents(payloads, 'Занятие закрыто без результата. Место на неделе свободно');
+}
+
+// Смена игрового дня: начатые вчера занятия фиксируются по уже сохранённым отметкам (идемпотентно).
+// Пустые закрываются без награды. Вызывается при запуске (после синхронизации), смене дня и возврате во вкладку.
+let closingStale = false;
+async function closeStaleSessions() {
+  if (closingStale) return;
+  closingStale = true;
+  try {
+    absorbDisk();
+    const today = gameDayKey(Date.now());
+    const stale = [...getSessions().values()].filter(s => s.status === 'open' && s.day < today);
+    if (!stale.length) return;
+    const entries = stale.map(s => (progReward(s.prog, s.doneW).xp > 0
+      ? programResultEntry(s, true)
+      : planEntry({ op: 'session-close', sessionId: s.id, reason: 'auto' })));
+    const stored = entries.map(e => ({ ...e, synced: false }));
+    save.log.push(...stored);
+    save.log.sort((a, b) => a.ts - b.ts);
+    if (!(await storage.save(save))) {
+      save.log = save.log.filter(e => !stored.includes(e));
+      saveRevision++;
+      return;
+    }
+    if (enforceLimits(stored.filter(e => entryType(e) === 'quest'))) await storage.save(save);
+    const results = stored.filter(e => entryType(e) === 'quest' && isActive(e));
+    if (results.length) {
+      showMessage(results.map(e => `Сохранено по отмеченным подходам за ${fmtDay(e.payload.gameDay)}: ${e.payload.prog.done} из ${e.payload.prog.total}, +${e.xp} XP, +${e.gold} монет`).join(' · '));
+    }
+    render();
+    sync();
+  } finally {
+    closingStale = false;
+  }
+}
+
+// ===== Перенос и удаление карточек силовых =====
+async function movePick(pickId, day) {
+  absorbDisk();
+  const pick = allPicks().find(p => p.pickId === pickId);
+  if (!pick) {
+    render();
+    return false;
+  }
+  const today = gameDayKey(Date.now());
+  const s = sessionOfPick(pickId);
+  if (s && (s.status === 'open' || s.status === 'done')) {
+    showMessage('Занятие уже начато — перенос невозможен');
+    return false;
+  }
+  if (day < today) {
+    showMessage('Перенести можно только на сегодня или позже');
+    return false;
+  }
+  if (pick.day === day) return false;
+  if (picksForDay(day).some(p => p.pickId !== pickId && refKey(p.ref) === refKey(pick.ref))) {
+    showMessage(`На ${fmtDay(day)} это задание уже запланировано`);
+    return false;
+  }
+  const block = pick.ref.kind === 'quest' ? groupPlanBlock(pick.ref.questId, day, pickId) : null;
+  if (block) {
+    showMessage(block);
+    return false;
+  }
+  return writePlanEvent({ op: 'pick-move', pickId, day }, `Перенесено на ${fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' })}`);
+}
+
+async function planGroupQuest(questId, day) {
+  absorbDisk();
+  const today = gameDayKey(Date.now());
+  const q = QUESTS.find(x => x.id === questId);
+  if (!q || day < today) return false;
+  if (q.program && !programActive(q, day)) {
+    showMessage(`Программа доступна для занятий с ${fmtDay(q.legacy.until)}`);
+    return false;
+  }
+  if (picksForDay(day).some(p => p.ref.kind === 'quest' && p.ref.questId === questId)) {
+    showMessage(`На ${fmtDay(day)} уже запланировано`);
+    return false;
+  }
+  const block = groupPlanBlock(questId, day);
+  if (block) {
+    showMessage(block);
+    return false;
+  }
+  return writePlanEvent({ op: 'pick-add', pickId: crypto.randomUUID(), day, ref: { kind: 'quest', questId } },
+    `Запланировано: ${fmtDay(day, { weekday: 'long', day: 'numeric', month: 'long' })}`);
+}
+
+// Дни для выбора даты силовой: сегодня … конец следующей недели (не раньше запуска программы)
+function planDayOptions(quest, today) {
+  const from = groupFrom(quest) ?? today;
+  const start = today > from ? today : from;
+  const end = addDays(weekKeyOf(start), 13);
+  const pref = STRENGTH_GROUPS[quest.group]?.preferredDays ?? [];
+  const days = [];
+  for (let d = start; d <= end; d = addDays(d, 1)) days.push({ day: d, pref: pref.includes(weekdayOf(d)) });
+  return days;
+}
+
+// Таймер окончания отдыха: интерфейс обновится сам, без перезагрузки
+let restTimer = null;
+function scheduleRestTimer() {
+  clearTimeout(restTimer);
+  const next = Math.min(...Object.keys(STRENGTH_GROUPS).map(g => groupNextAt(g)).filter(t => t > Date.now()));
+  if (Number.isFinite(next) && next - Date.now() < 2 ** 31 - 1) {
+    restTimer = setTimeout(() => render(), next - Date.now() + 500);
+  }
+}
+
+// ===== Раскрываемая карточка задания (каталог и «Сегодня») =====
+// Раскрытие — настройка интерфейса (ui.open), отметки — данные игры. Переключение не перерисовывает экран.
+function qOpen(key) {
+  return ui.open[key] === true;
+}
+
+function qToggle(key) {
+  const open = qOpen(key);
+  return html`<button class="qtoggle" type="button" data-qtoggle="${key}" aria-expanded="${open ? 'true' : 'false'}"
+    aria-controls="qb-${key}"><span class="qtoggle-arrow" aria-hidden="true"></span>Подробнее</button>`;
+}
+
+function qBody(key, content) {
+  return html`<div class="qcard-body" id="qb-${key}" ${qOpen(key) ? '' : 'hidden'}>${content}</div>`;
+}
+
+function limitText(limit) {
+  return `не больше ${limit.max} ${limit.period === 'day' ? 'в день' : 'в неделю'}`;
+}
+
+// Подробности обычного квеста: существующая подсказка guide; без неё — критерий из названия, частота, награда
+function renderQuestInfo(q, today) {
+  const g = q.guide ?? {};
+  const rw = questReward(q, today);
+  const conf = q.group ? STRENGTH_GROUPS[q.group] : null;
+  return html`
+    ${g.firstStep ? html`<p class="today-step"><b>Первый шаг:</b> ${g.firstStep}</p>` : ''}
+    <p class="today-line"><b>${g.done ? 'Готово, когда:' : 'Критерий:'}</b> ${g.done ?? rw.name}</p>
+    ${g.example ? html`<p class="today-line"><b>Например:</b> ${g.example}</p>` : ''}
+    ${g.hint ? html`<p class="today-hint">${g.hint}</p>` : ''}
+    ${g.note ? html`<p class="today-note">${g.note}</p>` : ''}
+    <p class="today-line"><b>Частота:</b> ориентир ${q.goal}; ${limitText(q.limit)}</p>
+    <p class="today-line"><b>Награда:</b> +${rw.xp} XP, ${rw.gold} монет</p>
+    ${conf && today >= conf.from ? html`<p class="today-note">Общий лимит силовых (дом и зал вместе): ${conf.maxPerWeek} занятия в неделю; следующая — не раньше чем через ${conf.restHours} ч после прошлой нагрузки.</p>` : ''}`;
+}
+
+// Последние сохранённые значения пунктов в прошлых занятиях — подсказка, не отметка
+function lastValues(questId, exceptId) {
+  const res = new Map();
+  const list = [...getSessions().values()].filter(s => s.questId === questId && s.id !== exceptId)
+    .sort((a, b) => a.startTs - b.startTs);
+  for (const s of list) {
+    for (const [itemId, m] of s.marks) {
+      if (m.reps !== undefined || m.reps2 !== undefined || m.kg !== undefined || m.variant !== undefined) res.set(itemId, m);
+    }
+  }
+  return res;
+}
+
+function fmtLast(m, ex) {
+  if (!m) return '';
+  const parts = [];
+  if (m.reps !== undefined) parts.push(ex?.sides ? `${m.reps}${m.reps2 !== undefined ? `/${m.reps2}` : ''} повт.` : `${m.reps} повт.`);
+  if (m.kg !== undefined) parts.push(`${String(m.kg).replace('.', ',')} кг`);
+  return parts.join(', ');
+}
+
+function renderProgramBody(q, s, place, today) {
+  const pr = PROGRAMS[q.program];
+  const open = s?.status === 'open' && s.day === today;
+  const closed = s && s.status !== 'open';
+  const prog = s?.prog ?? programSnapshot(pr);
+  const marks = s?.marks ?? new Map();
+  const doneW = open ? s.doneW : 0;
+  const r = progReward(prog, doneW);
+  const prepDone = Boolean(marks.get('prep')?.done);
+  const canWork = open && (prepDone || doneW > 0) && !progBusy;
+  const last = lastValues(q.id, s?.id);
+  const sid = s?.id ?? '';
+  const legacyNow = !programActive(q, today);
+  const itemSet = new Set(prog.items.map(i => i.id));
+  const result = s?.status === 'done' ? s.result.payload.prog : null;
+  const resultItems = new Set(result?.items ?? []);
+  const val = (fk, v) => markDrafts.has(fk) ? markDrafts.get(fk) : (v ?? '');
+
+  const setRow = (ex, k) => {
+    const id = `${ex.id}-${k}`;
+    if (!itemSet.has(id)) return '';
+    const m = marks.get(id) ?? {};
+    const checked = closed ? resultItems.has(id) : Boolean(m.done);
+    const fk = `${place}:${sid}:${id}`;
+    const label = `Подход ${k}${ex.setLabel ? ` — ${ex.setLabel}` : ''}`;
+    if (!open) {
+      return html`<li class="set-view ${checked ? 'ok' : ''}">${s ? (checked ? '✓ ' : '○ ') : ''}${label}${s && (m.reps !== undefined || m.kg !== undefined) ? html` · <span class="muted">${fmtLast(m, ex)}</span>` : ''}</li>`;
+    }
+    const lm = last.get(id);
+    return html`
+      <li class="set-row" data-set-row data-mark-session="${sid}" data-item="${id}">
+        <label class="chk"><input type="checkbox" data-mark-check data-fkey="${fk}:c" ${checked ? 'checked' : ''} ${canWork ? '' : 'disabled'}>
+          <span>${label}</span></label>
+        <span class="set-vals">
+          <label>${ex.sides ? `повт. ${ex.sides[0]}` : 'повт.'}
+            <input type="number" inputmode="numeric" min="0" max="999" step="1" data-val="reps" data-fkey="${fk}:r"
+              value="${val(`${fk}:r`, m.reps)}" placeholder="${lm?.reps ?? ''}" ${progBusy ? 'disabled' : ''}></label>
+          ${ex.sides ? html`<label>повт. ${ex.sides[1]}
+            <input type="number" inputmode="numeric" min="0" max="999" step="1" data-val="reps2" data-fkey="${fk}:r2"
+              value="${val(`${fk}:r2`, m.reps2)}" placeholder="${lm?.reps2 ?? ''}" ${progBusy ? 'disabled' : ''}></label>` : ''}
+          ${ex.weight ? html`<label>кг (одна гантель)
+            <input type="text" inputmode="decimal" maxlength="5" autocomplete="off" data-val="kg" data-fkey="${fk}:kg"
+              value="${val(`${fk}:kg`, m.kg)}" placeholder="${lm?.kg ?? ''}" ${progBusy ? 'disabled' : ''}></label>` : ''}
+        </span>
+        ${lm && fmtLast(lm, ex) ? html`<small class="muted set-last">в прошлый раз: ${fmtLast(lm, ex)}</small>` : ''}
+      </li>`;
+  };
+
+  const exercise = (ex) => {
+    const vm = marks.get(`ex:${ex.id}`);
+    const lv = last.get(`ex:${ex.id}`)?.variant;
+    return html`
+      <section class="ex">
+        <header class="ex-head"><h4>${ex.name}</h4><span class="ex-reps">${pr.sets} × ${ex.reps}</span></header>
+        <details class="info ex-tech" data-details="tech-${place}-${ex.id}" ${detailsAttr(`tech-${place}-${ex.id}`)}>
+          <summary>Техника</summary>
+          <p>${ex.hint}</p>
+          ${ex.sides ? html`<p>Один пункт — подход ${ex.setLabel}; стороны не дают отдельной награды. Неполный парный подход не отмечай — запиши фактические повторы.</p>` : ''}
+          <p>${ex.links.map((l, i) => html`${i ? ' · ' : ''}<a href="${l.url}" target="_blank" rel="noopener noreferrer">${l.label}</a>`)}</p>
+        </details>
+        ${open && ex.variants ? html`
+          <label class="ex-variant">Вариант
+            <select data-variant data-mark-session="${sid}" data-item="ex:${ex.id}" data-fkey="${place}:${sid}:ex:${ex.id}" ${progBusy ? 'disabled' : ''}>
+              <option value="" ${vm?.variant ? '' : 'selected'}>— не указан —</option>
+              ${ex.variants.map(v => html`<option value="${v}" ${vm?.variant === v ? 'selected' : ''}>${v}</option>`)}
+            </select></label>
+          ${lv && !vm?.variant ? html`<small class="muted">в прошлый раз: ${lv}</small>` : ''}` : ''}
+        ${!open && vm?.variant ? html`<p class="muted">Вариант: ${vm.variant}</p>` : ''}
+        <ul class="sets">${Array.from({ length: pr.sets }, (_, i) => setRow(ex, i + 1))}</ul>
+      </section>`;
+  };
+
+  let summary;
+  if (result) {
+    summary = html`<p class="prog-sum ok" role="status">Результат: ${result.done} из ${result.total} подходов · +${s.result.xp} XP, +${s.result.gold} монет${result.auto ? html` · сохранено по отмеченным подходам за ${fmtDay(s.day)}` : ''}${result.done >= result.total ? ' · выполнено полностью' : ''}</p>`;
+  } else if (s?.status === 'cancelled') {
+    summary = html`<p class="today-note">Результат занятия ${fmtDay(s.day)} отменён; заново заработать за это занятие нельзя.</p>`;
+  } else if (open) {
+    summary = html`<p class="prog-sum">Выполнено ${r.done}/${r.total} · ${r.pct}% · при завершении: ${r.xp} XP, ${r.gold} монет</p>`;
+  } else {
+    summary = html`<p class="prog-sum">${pr.summary} · ${r.total} рабочих подходов · до ${pr.xp} XP · ${pr.gold} монет</p>`;
+  }
+
+  return html`
+    <div class="prog">
+      ${summary}
+      ${legacyNow ? html`<p class="today-note">Наградные занятия по этой программе — с ${fmtDay(q.legacy.until, { weekday: 'long', day: 'numeric', month: 'long' })}. Сейчас можно изучить технику и попробовать движения без отметок.</p>` : ''}
+      <p class="prog-hint">${pr.loadHint}</p>
+      <details class="info" data-details="prog-about-${place}" ${detailsAttr(`prog-about-${place}`)}>
+        <summary>О программе, инвентарь и порядок</summary>
+        <p>${pr.purpose}</p>
+        <p><b>Инвентарь:</b> ${pr.inventory}</p>
+        <p><b>Порядок:</b> ${pr.order}</p>
+        <p>${pr.rangeNote}</p>
+        <p>${pr.coach}</p>
+        <p>${pr.sources.map((l, i) => html`${i ? ' · ' : ''}<a href="${l.url}" target="_blank" rel="noopener noreferrer">${l.label}</a>`)}</p>
+      </details>
+      <details class="info" data-details="prog-progress-${place}" ${detailsAttr(`prog-progress-${place}`)}>
+        <summary>Когда повышать нагрузку</summary>
+        <p>${pr.progression}</p>
+      </details>
+      <section class="ex prep">
+        <header class="ex-head"><h4>Подготовка и разминка</h4><span class="ex-reps">без отдельной награды</span></header>
+        <p>${pr.prep.text}</p>
+        <p class="muted">${pr.prep.note}</p>
+        ${open ? html`
+          <div class="set-row" data-set-row data-mark-session="${sid}" data-item="prep">
+            <label class="chk"><input type="checkbox" data-mark-check data-fkey="${place}:${sid}:prep:c" ${prepDone ? 'checked' : ''} ${progBusy ? 'disabled' : ''}>
+              <span>${pr.prep.label}</span></label>
+          </div>
+          ${!prepDone && !doneW ? html`<p class="today-note">Отметь подготовку — откроются отметки рабочих подходов.</p>` : ''}` : ''}
+      </section>
+      ${pr.exercises.map(exercise)}
+      <p class="prog-safety">${pr.safety}</p>
+      ${open ? html`
+        <div class="today-actions">
+          <button class="today-btn" data-prog-later="${sid}" data-place="${place}">Вернуться позже</button>
+          ${doneW > 0 ? html`<button class="today-btn primary" data-prog-finish="${sid}" ${progBusy ? 'disabled' : ''}>
+              ${progBusy ? 'Сохраняю…' : r.done >= r.total ? `Завершить: все ${r.total} · +${r.xp} XP, ${r.gold} монет` : `Завершить на ${r.pct}% · +${r.xp} XP, ${r.gold} монет`}</button>`
+            : html`<button class="today-btn" data-prog-close="${sid}">Закрыть без результата</button>`}
+        </div>
+        <p class="today-note">Отметки сохраняются сразу. «Вернуться позже» оставляет их; в 04:00 занятие сохранится по отмеченным подходам.</p>` : ''}
+    </div>`;
+}
+
+// Состояние программы для заголовка/кнопок: какая кнопка и почему недоступна
+function programAction(q, today, now, pickId = null) {
+  const s = openSession(q.id, today);
+  if (s) return { kind: 'continue', s };
+  if (!programActive(q, today)) return { kind: 'preview', reason: `Наградный старт — с ${fmtDay(q.legacy.until)}` };
+  if (questLeft(q) <= 0) return { kind: 'done' };
+  const todayPick = pickId ?? picksForDay(today).find(p => p.ref.kind === 'quest' && p.ref.questId === q.id)?.pickId ?? null;
+  const block = groupBlock(q, now, todayPick);
+  return block ? { kind: 'blocked', reason: block } : { kind: 'start' };
+}
+
+function renderProgramPickCard(pick, ctx) {
+  const { today, rules } = ctx;
+  const now = Date.now();
+  const q = QUESTS.find(x => x.id === pick.ref.questId);
+  const stat = STATS.find(x => x.id === q.stat);
+  const key = `today:${pick.pickId}`;
+  const s = sessionOfPick(pick.pickId);
+  const sOpen = s?.status === 'open' && s.day === today ? s : null;
+  const act = sOpen ? { kind: 'continue', s: sOpen } : s?.status === 'done' ? { kind: 'done' } : programAction(q, today, now, pick.pickId);
+  const state = sOpen ? 'active' : s?.status === 'done' ? 'done' : 'ready';
+  const r = sOpen ? progReward(sOpen.prog, sOpen.doneW) : null;
+  const dir = pickDir(pick, rules);
+  const wk = q.group && today >= groupFrom(q) ? groupWeek(q.group, weekKeyOf(today), now) : null;
+  return html`
+    <article class="today-card ${state}" style="--c: ${stat.color}" data-pick-card="${pick.pickId}" tabindex="-1">
+      <header class="today-card-head">
+        ${iconImg(stat.icon)}
+        <h3>${q.name}</h3>
+        <span class="today-reward">${r ? `${r.done}/${r.total} · ${r.xp} XP` : `до ${q.xp} XP · ${q.gold} монет`}</span>
+      </header>
+      <p class="today-meta">
+        ${dir ? html`<span class="dir-tag">${dirName(dir)}</span>` : ''}
+        ${PROGRAMS[q.program].summary}${wk ? ` · занятия недели: ${wk.slots} из ${wk.max} · объём: ${fmtVol(wk.volume)}` : ''}
+      </p>
+      ${r ? html`<div class="prog-bar" aria-hidden="true"><div style="width: ${r.pct}%"></div></div>` : ''}
+      ${s?.status === 'done' ? html`<p class="today-done" role="status">✓ ${s.result.payload.prog.done >= s.result.payload.prog.total ? 'Выполнено полностью' : `Сохранено: ${s.result.payload.prog.done} из ${s.result.payload.prog.total}`} · +${s.result.xp} XP</p>` : ''}
+      <div class="today-actions">
+        ${act.kind === 'continue' ? html`<button class="today-btn primary" data-prog-open="${key}" data-pick-id="${pick.pickId}">${qOpen(key) ? 'Занятие идёт' : 'Продолжить'}</button>` : ''}
+        ${act.kind === 'start' || act.kind === 'blocked' || act.kind === 'preview' ? html`<button class="today-btn primary" data-prog-start="${q.id}" data-pick-id="${pick.pickId}" ${act.kind === 'start' && !progBusy ? '' : 'disabled'}>Начать</button>` : ''}
+        ${qToggle(key)}
+      </div>
+      ${act.reason ? html`<p class="today-note">${act.reason}</p>` : ''}
+      ${qBody(key, renderProgramBody(q, s ?? null, 'today', today))}
+      ${s?.status === 'done' ? '' : html`<button class="link-btn pick-remove" data-pick-action="remove" data-pick-id="${pick.pickId}">Убрать из плана</button>`}
+    </article>`;
+}
+
+// Блок силовых в «Сегодня»: места и объём недели, отдых, запланированные даты и их перенос
+function renderStrengthPanel(plan, today, now) {
+  const g = 'strength-session';
+  const conf = STRENGTH_GROUPS[g];
+  const home = QUESTS.find(q => q.group === g && q.program);
+  if (!home) return '';
+  const nextAt = groupNextAt(g);
+  const wk = today >= conf.from ? groupWeek(g, weekKeyOf(today), now) : null;
+  const volNeed = plan.weekRules?.weeklyVolume?.strength;
+  const weekKeys = [weekKeyOf(today), addDays(weekKeyOf(today), 7)];
+  const reserved = weekKeys.flatMap(w => (w >= weekKeyOf(conf.from) ? groupWeek(g, w, now).reserved : []));
+  const options = planDayOptions(home, today);
+  const dayLabel = d => fmtDay(d, { weekday: 'short', day: 'numeric', month: 'short' });
+  const prefNames = conf.preferredDays.map(d => ['вс', 'пн', 'вт', 'ср', 'чт', 'пт', 'сб'][d]).join('/');
+  const select = (name, selected) => html`
+    <select name="${name}" data-fkey="strength:${name}">
+      ${options.map(o => html`<option value="${o.day}" ${o.day === selected ? 'selected' : ''}>${dayLabel(o.day)}${o.pref ? ' ★' : ''}</option>`)}
+    </select>`;
+  return html`
+    <section class="strength-box" aria-label="Силовые занятия">
+      <p class="strength-head"><b>Силовые</b>${wk
+        ? ` · занятия недели: ${wk.slots} из ${wk.max} (завершено ${wk.used}) · объём: ${fmtVol(wk.volume)}${volNeed ? ` из ${volNeed}` : ''}`
+        : ` · домашняя программа — с ${fmtDay(conf.from, { weekday: 'short', day: 'numeric', month: 'long' })}`}</p>
+      ${nextAt > now ? html`<p class="today-note">Отдых: следующая силовая — с ${fmtWhen(nextAt)}.</p>` : ''}
+      ${!wk ? html`<p class="today-note">${conf.maxPerWeek} занятия в неделю (дом и зал вместе), ориентир — ${prefNames}; четверг можно перенести на пятницу. Отдых — ${conf.restHours} ч после последнего подхода. Программу можно изучить в каталоге «Сила» и уже запланировать даты.</p>` : ''}
+      ${reserved.length ? html`
+        <ul class="strength-plan">
+          ${reserved.map(p => html`
+            <li data-reserved="${p.pickId}">
+              <span>${dayLabel(p.day)} — ${QUESTS.find(q => q.id === p.ref.questId)?.name ?? p.ref.questId}</span>
+              <span class="strength-ctl">
+                <label class="sr-only" for="mv-${p.pickId}">Новая дата</label>
+                <select id="mv-${p.pickId}" data-move-select="${p.pickId}" data-fkey="strength:mv:${p.pickId}">
+                  ${options.map(o => html`<option value="${o.day}" ${o.day === p.day ? 'selected' : ''}>${dayLabel(o.day)}${o.pref ? ' ★' : ''}</option>`)}
+                </select>
+                <button class="small-btn" data-move-pick="${p.pickId}">Перенести</button>
+                <button class="small-btn" data-pick-action="remove" data-pick-id="${p.pickId}">Убрать</button>
+              </span>
+            </li>`)}
+        </ul>` : ''}
+      <form class="strength-add" data-strength-plan>
+        <label>Запланировать домашнюю силовую ${select('day', options.find(o => o.pref && !reserved.some(p => p.day === o.day))?.day)}</label>
+        <button class="small-btn primary" type="submit">Запланировать</button>
+      </form>
+    </section>`;
 }
 
 // ===== Раздел «Задачи дня» =====
@@ -2757,6 +3763,7 @@ function carryOverPicks(today) {
   const projects = getProjects();
   return picksForDay(yesterday).filter(p => {
     if (todayKeys.has(refKey(p.ref))) return false;
+    if (sessionOfPick(p.pickId)) return false; // начатое вчера занятие закрыто своим днём
     if (p.ref.kind === 'quest') return !doneQuests.has(p.ref.questId);
     return !projects.get(p.ref.projectId)?.stages.get(p.ref.stageId)?.done;
   });
@@ -2773,11 +3780,24 @@ function renderTodayMinimums(plan, today, picks) {
   const done = plan.dirsByDay.get(today) ?? new Set();
   const covered = new Set(picks.map(p => pickDir(p, rules)).filter(Boolean));
   const required = requiredDaily(today, rules);
-  const dailyOn = plan.active && today >= plan.firstDay;
-  const weekOn = plan.active && today >= plan.firstWeek;
+  const dailyOn = plan.active && plan.dayActive;
+  const weekOn = plan.active && plan.weekActive;
   const pen = plan.active ? planPenalty(plan, today) : { total: 0 };
   const week = weekOn ? plan.weeks.get(weekKeyOf(today)) : null;
   const daysLeft = 7 - (weekdayOf(today) + 6) % 7;
+  const wr = plan.weekRules ?? rules;
+  const nextWr = plan.nextWeekRules;
+  const weekDesc = r => [
+    ...Object.entries(r.weekly).map(([dir, n]) => `${dirName(dir).toLowerCase()} ${n} ${n > 1 ? 'разных дня' : 'день'}`),
+    ...Object.entries(r.weeklyVolume ?? {}).map(([dir, n]) => `${dirName(dir).toLowerCase()}: объём ${n}`),
+  ].join(', ');
+  const stLine = (dir, st) => st.kind === 'volume'
+    ? html`<li>${st.ok ? '✓' : '○'} ${dirName(dir)}: объём ${fmtVol(st.have)} из ${st.need}${st.ok ? '' : ` (дом — доля подходов, зал — 1), осталось дней в неделе: ${daysLeft}`}</li>`
+    : html`<li>${st.ok ? '✓' : '○'} ${dirName(dir)}: ${Math.min(st.have, st.need)}/${st.need} ${st.need > 1 ? 'дня' : 'день'}${st.ok ? '' : `, осталось дней в неделе: ${daysLeft}`}</li>`;
+  // Заметка об обновлении недельных правил: до начала новой версии и в её первую неделю
+  const hadOld = plan.acts?.some(a => !a.rules.weeklyVolume);
+  const changed = !hadOld ? null : nextWr?.rules.weeklyVolume ? nextWr
+    : weekOn && wr.weeklyVolume && plan.weekRulesFrom && today < addDays(plan.weekRulesFrom, 7) ? { rules: wr, weekFrom: plan.weekRulesFrom } : null;
 
   const chip = (dir, ok, label) => html`<span class="min-chip ${ok ? 'ok' : covered.has(dir) ? 'planned' : ''}">${ok ? '✓' : covered.has(dir) ? '◐' : '○'} ${label}</span>`;
   return html`
@@ -2790,15 +3810,16 @@ function renderTodayMinimums(plan, today, picks) {
       </div>
       ${pen.total ? html`<p class="penalty-line">Вчера не выполнено: ${pen.dMiss.map(dirName).join(', ')}${pen.wMiss.length ? `${pen.dMiss.length ? '; ' : ''}за прошлую неделю: ${pen.wMiss.map(dirName).join(', ')}` : ''}. Сегодня переходный запас меньше на ${pen.total} мин.</p>` : ''}
       <details class="info" data-details="plan-week" ${detailsAttr('plan-week')}>
-        <summary>Неделя${week ? ` · ${Object.values(week).filter(s => s.days >= s.need).length}/${Object.keys(week).length}` : ''}</summary>
+        <summary>Неделя${week ? ` · ${Object.values(week).filter(st => st.ok).length}/${Object.keys(week).length}` : ''}</summary>
         ${weekOn ? html`
           <ul>
-            ${Object.entries(week).map(([dir, s]) => html`<li>${s.days >= s.need ? '✓' : '○'} ${dirName(dir)}: ${Math.min(s.days, s.need)}/${s.need} ${s.need > 1 ? 'дня' : 'день'}${s.days >= s.need ? '' : `, осталось дней в неделе: ${daysLeft}`}</li>`)}
-          </ul>` : html`<p>Недельные минимумы начнутся с ${plan.firstWeek ? fmtDay(plan.firstWeek) : 'следующего понедельника'}.</p>`}
+            ${Object.entries(week).map(([dir, st]) => stLine(dir, st))}
+          </ul>` : html`<p>Недельные минимумы начнутся с ${nextWr ? fmtDay(nextWr.weekFrom) : plan.firstWeek ? fmtDay(plan.firstWeek) : 'следующего понедельника'}.</p>`}
+        ${changed?.rules.weeklyVolume ? html`<p class="update-note"><b>Обновление правил недели</b> (с ${fmtDay(changed.weekFrom)}): прежнее «физическая активность в 2 разных дня» заменено на «силовая программа: объём 2». Домашняя тренировка даёт долю выполненных подходов, полное занятие в зале — 1. Прогулки, кардио и шаги дают свои награды, но силовой объём не закрывают. Дневные минимумы не меняются.</p>` : ''}
         <ul>
           <li>Бонус дня: +${rules.dayBonus} монет за все дневные направления (пн–пт — работа и чтение/обучение, сб–вс — чтение/обучение).</li>
-          <li>Бонус недели: +${rules.weekBonus} монет — физическая активность 2 разных дня, творчество 1 день, общение/речь 1 день.</li>
-          <li>Пропуск дневного направления: −${rules.dailyPenalty} мин переходного запаса на следующий день (не больше ${rules.dailyPenaltyMax}); недельного — −${rules.weeklyPenalty} мин в следующий понедельник (не больше ${rules.weeklyPenaltyMax}); всего не больше ${rules.totalPenaltyMax} мин. HP, золото и купленные минуты не меняются.</li>
+          <li>Бонус недели: +${wr.weekBonus} монет — ${weekDesc(wr)}.${nextWr && nextWr.rules !== wr ? ` С ${fmtDay(nextWr.weekFrom)}: ${weekDesc(nextWr.rules)}.` : ''}</li>
+          <li>Пропуск дневного направления: −${rules.dailyPenalty} мин переходного запаса на следующий день (не больше ${rules.dailyPenaltyMax}); недельного — одна поправка −${wr.weeklyPenalty} мин в следующий понедельник за каждое направление (не больше ${wr.weeklyPenaltyMax}); всего не больше ${rules.totalPenaltyMax} мин. HP, золото и купленные минуты не меняются.</li>
           <li>◐ — направление есть в плане, ✓ — выполнено. Выполнение без плана тоже засчитывается.</li>
         </ul>
       </details>
@@ -2810,13 +3831,16 @@ function renderPickCard(pick, ctx) {
   const isStage = pick.ref.kind === 'stage';
   const questId = isStage ? WORK_QUEST : pick.ref.questId;
   const quest = QUESTS.find(q => q.id === questId);
+  if (quest.program && (programActive(quest, today) || sessionOfPick(pick.pickId))) return renderProgramPickCard(pick, ctx);
+  const key = `today:${pick.pickId}`;
+  const reward = questReward(quest, today);
   const stat = STATS.find(s => s.id === quest.stat);
   const dir = pickDir(pick, rules);
   const comps = questCompletions(today);
   const active = draft?.pickId === pick.pickId;
   const blocked = Boolean(draft) && !active;
   const error = todayError?.pickId === pick.pickId ? todayError.text : '';
-  const gold = Math.round(quest.xp * BALANCE.goldPerXp);
+  const gold = reward.gold;
   const workLeft = Math.max(questLeft(QUESTS.find(q => q.id === WORK_QUEST)), 0);
   const g = quest.guide ?? {};
   let proj = null;
@@ -2837,6 +3861,11 @@ function renderPickCard(pick, ctx) {
     const readingLeft = READING.includes(questId) && READING.some(id => questLeft(QUESTS.find(q => q.id === id)) > 0);
     canStart = left > 0 || readingLeft;
     if (count > 0 && !canStart) state = 'done';
+    const block = canStart && quest.group ? groupBlock(quest, Date.now(), pick.pickId) : null;
+    if (block) {
+      canStart = false;
+      doneLine = [doneLine, block].filter(Boolean).join(' · ');
+    }
     doneLine = count ? `сегодня ${count} из ${quest.limit.max}` : '';
   }
   if (active) state = 'active';
@@ -2858,8 +3887,8 @@ function renderPickCard(pick, ctx) {
     <article class="today-card ${state}" style="--c: ${stat.color}" data-pick-card="${pick.pickId}" tabindex="-1">
       <header class="today-card-head">
         ${iconImg(stat.icon)}
-        <h3>${isStage ? `${proj.name} › ${st.name}` : quest.name}</h3>
-        <span class="today-reward">+${quest.xp} XP · ${goldLabel(gold)}</span>
+        <h3>${isStage ? `${proj.name} › ${st.name}` : reward.name}</h3>
+        <span class="today-reward">+${reward.xp} XP · ${goldLabel(gold)}</span>
       </header>
       <p class="today-meta">
         ${dir ? html`<span class="dir-tag">${dirName(dir)}</span>` : ''}
@@ -2868,12 +3897,9 @@ function renderPickCard(pick, ctx) {
       ${active && draft.startedDay !== today ? html`<p class="today-error">Подход начат ${fmtDay(draft.startedDay)} — будет засчитан за ${fmtDay(today)}.</p>` : ''}
       ${state === 'done' && !isStage ? html`<p class="today-done" role="status">✓ Выполнено</p>` : ''}
       ${state === 'done' && isStage ? html`<p class="today-done" role="status">✓ Этап готов</p>` : ''}
-      ${state !== 'done' && g.firstStep ? html`<p class="today-step"><b>${active ? 'Сейчас:' : 'Первый шаг:'}</b> ${g.firstStep}</p>` : ''}
-      ${state !== 'done' && g.done ? html`<p class="today-line"><b>Готово, когда:</b> ${g.done}</p>` : ''}
-      ${state !== 'done' && g.example ? html`<p class="today-line"><b>Например:</b> ${g.example}</p>` : ''}
+      ${active && g.firstStep ? html`<p class="today-step"><b>Сейчас:</b> ${g.firstStep}</p>` : ''}
+      ${active && g.done ? html`<p class="today-line"><b>Готово, когда:</b> ${g.done}</p>` : ''}
       ${st?.note ? html`<p class="today-line"><b>Заметка:</b> ${st.note}</p>` : ''}
-      ${active && g.hint ? html`<p class="today-hint">${g.hint}</p>` : ''}
-      ${!active && g.note && state !== 'done' ? html`<p class="today-note">${g.note}</p>` : ''}
       ${error ? html`<p class="today-error" role="alert">⚠️ ${error}</p>` : ''}
       <div class="today-actions">
         ${active ? html`
@@ -2884,7 +3910,9 @@ function renderPickCard(pick, ctx) {
             ${isStage ? 'Начать подход' : count ? 'Новый подход' : 'Начать'}</button>
         ` : ''}
         ${isStage ? html`<button class="today-btn" data-pick-action="stage-done" data-pick-id="${pick.pickId}">${st.done ? 'Вернуть этап в работу' : 'Этап готов'}</button>` : ''}
+        ${qToggle(key)}
       </div>
+      ${qBody(key, renderQuestInfo(quest, today))}
       ${isStage && !canStart && !active ? html`<p class="today-note">Наградные подходы на сегодня исчерпаны (${quest.limit.max} из ${quest.limit.max}). Этапы можно отмечать и редактировать.</p>` : ''}
       ${blocked && state !== 'done' ? html`<p class="today-note">Сначала заверши или отложи начатый подход.</p>` : ''}
       <button class="link-btn pick-remove" data-pick-action="remove" data-pick-id="${pick.pickId}">Убрать из плана</button>
@@ -2921,6 +3949,7 @@ function renderToday() {
     </button></h3>
     <div class="fold-body" id="fold-body-tasks">
       ${renderTodayMinimums(plan, today, picks)}
+      ${renderStrengthPanel(plan, today, now)}
       ${carry.length ? html`
         <div class="carry">
           <p class="today-note">Вчера не завершено: ${carry.length}. Перенести на сегодня?</p>
@@ -2948,6 +3977,7 @@ document.getElementById('today').addEventListener('click', (e) => {
     const action = btn.dataset.pickAction;
     if (action === 'later') { laterSession(btn.dataset.pickId); return; }
     if (action === 'finish') { finishSession(btn.dataset.pickId, btn.dataset.finishQuest); return; }
+    if (action === 'remove') { removePick(btn.dataset.pickId); return; } // в т.ч. запланированные на другие дни
     if (!pick) { render(); return; }
     if (action === 'start') startSession(pick);
     else if (action === 'remove') removePick(pick.pickId);
@@ -2959,14 +3989,19 @@ document.getElementById('today').addEventListener('click', (e) => {
   }
   const carry = e.target.closest('[data-carry]');
   if (carry) {
-    const p = carryOverPicks(gameDayKey(Date.now())).find(x => x.pickId === carry.dataset.carry);
-    if (p) addPick(p.ref);
+    const today = gameDayKey(Date.now());
+    const p = carryOverPicks(today).find(x => x.pickId === carry.dataset.carry);
+    if (p && p.ref.kind === 'quest' && QUESTS.find(q => q.id === p.ref.questId)?.group) movePick(p.pickId, today);
+    else if (p) addPick(p.ref);
     return;
   }
   if (e.target.closest('[data-carry-all]')) {
     const today = gameDayKey(Date.now());
-    const list = carryOverPicks(today);
-    writePlanEvents(list.map(p => ({ op: 'pick-add', pickId: crypto.randomUUID(), day: today, ref: p.ref })), `Перенесено: ${list.length}`);
+    const all = carryOverPicks(today);
+    const isGroup = p => p.ref.kind === 'quest' && QUESTS.find(q => q.id === p.ref.questId)?.group;
+    const list = all.filter(p => !isGroup(p));
+    all.filter(isGroup).forEach(p => movePick(p.pickId, today)); // силовые — переносом с проверкой квоты
+    if (list.length) writePlanEvents(list.map(p => ({ op: 'pick-add', pickId: crypto.randomUUID(), day: today, ref: p.ref })), `Перенесено: ${list.length}`);
     return;
   }
   if (e.target.closest('[data-go-catalog]')) {
@@ -2982,6 +4017,7 @@ setInterval(() => {
   if (gameDayKey(Date.now()) !== todayDateShown || careDayKey(Date.now()) !== careDayShown) {
     todayError = null;
     render();
+    closeStaleSessions();
   }
 }, 30 * 1000);
 
@@ -2989,21 +4025,57 @@ setInterval(() => {
 let questCooldown = new Map(); // защита от двойного клика «Выполнить» в каталоге
 
 function renderCatalogRow(q, stat, rules, picksToday) {
+  const now = Date.now();
+  const today = gameDayKey(now);
   const left = Math.max(questLeft(q), 0);
   const dir = rules.questDirs[q.id];
   const picked = picksToday.some(p => p.ref.kind === 'quest' && p.ref.questId === q.id);
-  const gold = Math.round(q.xp * BALANCE.goldPerXp);
+  const key = `cat:${q.id}`;
+  const rw = questReward(q, today);
+  const prog = programActive(q, today);
+  const planBlock = !picked && q.group ? groupPlanBlock(q.id, today) : null;
+  let state = '';
+  let action;
+  let reason = '';
+  if (prog) {
+    const act = programAction(q, today, now);
+    const s = act.s;
+    const r = s ? progReward(s.prog, s.doneW) : null;
+    state = s ? `в процессе ${r.done}/${r.total}` : act.kind === 'done' ? 'сегодня выполнено' : '';
+    reason = act.reason ?? '';
+    action = act.kind === 'continue'
+      ? html`<button class="small-btn primary" data-prog-open="${key}">Продолжить</button>`
+      : html`<button class="small-btn primary" data-prog-start="${q.id}" ${act.kind === 'start' && !progBusy ? '' : 'disabled'}>Начать</button>`;
+  } else {
+    const block = left > 0 && q.group ? groupBlock(q, now) : null;
+    reason = block ?? '';
+    action = html`<button class="small-btn primary" data-quest="${q.id}" ${left === 0 || block ? 'disabled' : ''}>Выполнить</button>`;
+  }
+  const rewardText = prog ? `до ${rw.xp} XP · ${rw.gold} монет` : `+${rw.xp} XP, ${rw.gold} 🪙`;
   return html`
-    <div class="quest catalog-row" style="--c: ${stat.color}">
-      ${iconImg(q.icon ?? stat.icon)}
-      <span class="quest-main">${q.name}
-        <small>${dir ? html`<span class="dir-tag">${dirName(dir)}</span> ` : ''}ориентир: ${q.goal} · +${q.xp} XP, ${gold} 🪙 · осталось ${PERIOD_NAMES[q.limit.period]}: ${left}</small>
-      </span>
-      <span class="catalog-actions">
-        <button class="small-btn" data-pick-quest="${q.id}" ${picked ? 'disabled' : ''}>${picked ? 'В плане' : 'На сегодня'}</button>
-        <button class="small-btn primary" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>Выполнить</button>
-      </span>
+    <div class="quest catalog-row qcard" style="--c: ${stat.color}" data-catalog="${q.id}">
+      <div class="qcard-top">
+        ${iconImg(q.icon ?? stat.icon)}
+        <span class="quest-main">${rw.name}
+          ${prog && q.desc ? html`<small class="qcard-desc">${q.desc}</small>` : ''}
+          <small>${dir ? html`<span class="dir-tag">${dirName(dir)}</span> ` : ''}ориентир: ${q.goal} · ${rewardText} · осталось ${PERIOD_NAMES[q.limit.period]}: ${left}${state ? ` · ${state}` : ''}</small>
+          ${reason ? html`<small class="qcard-reason">${reason}</small>` : ''}
+        </span>
+        <span class="catalog-actions">
+          <button class="small-btn" data-pick-quest="${q.id}" ${picked || planBlock ? 'disabled' : ''} ${planBlock ? html`title="${planBlock}"` : ''}>${picked ? 'В плане' : 'На сегодня'}</button>
+          ${action}
+          ${qToggle(key)}
+        </span>
+      </div>
+      ${qBody(key, q.program
+        ? html`${!prog ? renderQuestInfo(q, today) : ''}${!prog ? html`<p class="today-line"><b>С ${fmtDay(q.legacy.until)} — новая программа «${q.name}»:</b></p>` : ''}${renderProgramBody(q, prog ? openSession(q.id, today) ?? lastDoneToday(q.id, today) : null, 'cat', today)}`
+        : renderQuestInfo(q, today))}
     </div>`;
+}
+
+// Завершённое сегодня занятие программы (для показа результата в каталоге)
+function lastDoneToday(questId, today) {
+  return [...getSessions().values()].filter(s => s.questId === questId && s.day === today && s.status === 'done').pop() ?? null;
 }
 
 const projUi = { create: { open: false, name: '', template: '', stages: '' }, edit: null, addStage: {}, pendingRender: false };
@@ -3285,7 +4357,117 @@ document.addEventListener('visibilitychange', () => {
   if (!document.hidden) {
     render();
     sync();
+    closeStaleSessions();
   }
+});
+
+// ===== Занятия программ: кнопки, отметки, значения =====
+// Обработчики на документе: одна и та же карточка занятия есть в каталоге и в «Сегодня»
+document.addEventListener('click', (e) => {
+  const t = e.target.closest('[data-qtoggle]');
+  if (t) {
+    const key = t.dataset.qtoggle;
+    ui.open[key] = !qOpen(key);
+    saveUi();
+    // Без перерисовки: фокус и введённые значения остаются на месте
+    document.querySelectorAll(`[data-qtoggle="${CSS.escape(key)}"]`).forEach(b => b.setAttribute('aria-expanded', ui.open[key] ? 'true' : 'false'));
+    const body = document.getElementById(`qb-${key}`);
+    if (body) body.hidden = !ui.open[key];
+    return;
+  }
+  const start = e.target.closest('[data-prog-start]');
+  if (start && !start.disabled) {
+    startProgram(start.dataset.progStart, start.dataset.pickId || null);
+    return;
+  }
+  const openBtn = e.target.closest('[data-prog-open]');
+  if (openBtn) {
+    const key = openBtn.dataset.progOpen;
+    ui.open[key] = true;
+    saveUi();
+    render();
+    document.getElementById(`qb-${key}`)?.querySelector('input:not([disabled]), select, button')?.focus();
+    return;
+  }
+  const fin = e.target.closest('[data-prog-finish]');
+  if (fin && !fin.disabled) {
+    finishProgram(fin.dataset.progFinish);
+    return;
+  }
+  const later = e.target.closest('[data-prog-later]');
+  if (later) {
+    const s = getSessions().get(later.dataset.progLater);
+    if (s) {
+      ui.open[`today:${s.pickId}`] = false;
+      ui.open[`cat:${s.questId}`] = false;
+      saveUi();
+      render();
+      showMessage(`Прогресс сохранён: ${s.doneW} из ${progReward(s.prog, s.doneW).total}. Вернись к занятию, когда будет удобно`);
+    }
+    return;
+  }
+  const close = e.target.closest('[data-prog-close]');
+  if (close) {
+    closeEmptyProgram(close.dataset.progClose);
+    return;
+  }
+  const mv = e.target.closest('[data-move-pick]');
+  if (mv) {
+    const sel = document.querySelector(`[data-move-select="${CSS.escape(mv.dataset.movePick)}"]`);
+    if (sel) movePick(mv.dataset.movePick, sel.value);
+  }
+});
+
+document.addEventListener('submit', (e) => {
+  const f = e.target.closest('[data-strength-plan]');
+  if (!f) return;
+  e.preventDefault();
+  const home = QUESTS.find(q => q.group === 'strength-session' && q.program);
+  planGroupQuest(home.id, f.day.value);
+});
+
+function parseMarkValue(kind, raw) {
+  const v = String(raw ?? '').trim().replace(',', '.');
+  if (v === '') return '';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return NaN;
+  return kind === 'kg' ? Math.round(n * 10) / 10 : n;
+}
+
+function rowValues(row) {
+  const vals = {};
+  row.querySelectorAll('[data-val]').forEach(inp => {
+    const v = parseMarkValue(inp.dataset.val, inp.value);
+    if (v !== '' && !Number.isNaN(v)) vals[inp.dataset.val] = v;
+  });
+  return vals;
+}
+
+document.addEventListener('input', (e) => {
+  const inp = e.target.closest('[data-val]');
+  if (inp?.dataset.fkey) markDrafts.set(inp.dataset.fkey, inp.value);
+});
+
+document.addEventListener('change', (e) => {
+  const row = e.target.closest('[data-set-row]');
+  const chk = e.target.closest('[data-mark-check]');
+  if (chk && row) {
+    markItem(row.dataset.markSession, row.dataset.item, { done: chk.checked, ...rowValues(row) });
+    return;
+  }
+  const inp = e.target.closest('[data-val]');
+  if (inp && row) {
+    const v = parseMarkValue(inp.dataset.val, inp.value);
+    if (Number.isNaN(v)) {
+      showMessage('⚠️ Введи число');
+      return;
+    }
+    markDrafts.delete(inp.dataset.fkey);
+    markItem(row.dataset.markSession, row.dataset.item, { [inp.dataset.val]: v });
+    return;
+  }
+  const varSel = e.target.closest('[data-variant]');
+  if (varSel) markItem(varSel.dataset.markSession, varSel.dataset.item, { variant: varSel.value, done: false });
 });
 
 window.addEventListener('online', sync);
