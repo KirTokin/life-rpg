@@ -2613,9 +2613,15 @@ function computePlan(log, now) {
   return {
     ...empty, active: true, activation: latest.entry, actDay: latest.day, firstDay, firstWeek,
     dayActive: Boolean(curDay), weekActive: Boolean(curWeek), weekRulesFrom: curWeek?.weekFrom ?? null,
-    nextWeekRules: acts.filter(a => a.weekFrom > weekKeyOf(today)).sort((x, y) => x.weekFrom < y.weekFrom ? -1 : 1)[0] ?? null,
+    nextWeekRules: nextWeekVersion(acts, today),
     bonusDays, bonusWeeks, dailyMissed, weeklyMissed, dayMissRules, weekMissRules, weeks, bonusGold,
   };
+}
+
+// Версия, которая начнёт действовать с ближайшей будущей недели (при равных датах — старшая)
+function nextWeekVersion(acts, today) {
+  const future = acts.filter(a => a.weekFrom > weekKeyOf(today)).map(a => a.weekFrom).sort();
+  return future.length ? versionAt(acts, future[0], 'weekFrom') : null;
 }
 
 // Поправка к переходному запасу развлечений для игрового дня.
