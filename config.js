@@ -105,11 +105,44 @@ const CARE_TASKS = [
 
 const CARE_PARTS = { morning: 'Утро', day: 'День', evening: 'Вечер' };
 
+// ===== Развлечения: учёт времени =====
+// Игры, YouTube/видео, фильмы и сериалы — один общий счёт минут. День — как у ухода (04:00–04:00).
+// Порядок расхода: сначала переходный запас дня, затем купленные минуты, затем долг.
+// Переходный запас — временный стартовый допуск для постепенного сокращения, не цель.
+// Чтобы изменить запас — ДОБАВЬТЕ версию в allowanceHistory с новой датой from; прошлое не пересчитывается.
+const LEISURE = {
+  maxBalance: 120,   // обычная покупка не поднимает запас купленных минут выше
+  maxDebt: 120,      // долг к погашению не больше; полный перерасход остаётся в истории
+  reviewAfterDays: 7,
+  maxSessionMinutes: 1440,
+  modes: {
+    home:    'Рабочий день дома',
+    office:  'Офис',
+    weekend: 'Выходной',
+  },
+  // день недели (0 — вс … 6 — сб) → режим дня
+  weekdayMode: { 0: 'weekend', 1: 'home', 2: 'office', 3: 'office', 4: 'home', 5: 'home', 6: 'weekend' },
+  allowanceHistory: [
+    { from: '2026-11-16', minutes: { home: 360, office: 120, weekend: 480 } },
+  ],
+  categories: [
+    { id: 'games',  name: 'Игры' },
+    { id: 'video',  name: 'YouTube / видео' },
+    { id: 'movies', name: 'Фильмы / сериалы' },
+    { id: 'mixed',  name: 'Смешанное' },
+  ],
+};
+
 // ===== Конфиг: награды (цена = 80 🪙 × дни усилий) =====
 // limit необязателен
 const REWARDS = [
   { id: 'treat',  name: 'Любимая вкусняшка',          icon: '🍰', cost: 50,   limit: { period: 'week', max: 3 } },
-  { id: 'series', name: 'Вечер сериала/игр (2 ч)',    icon: '🎬', cost: 80,   limit: { period: 'week', max: 3 } },
+  // retired: больше не продаётся, определение оставлено для истории старых покупок
+  { id: 'series', name: 'Вечер сериала/игр (2 ч)',    icon: '🎬', cost: 80,   limit: { period: 'week', max: 3 }, retired: true },
+  // Время развлечений: 1 монета = 3 минуты. minutes сохраняется в самой покупке
+  { id: 'leisure-15', name: '15 минут развлечений',   icon: '🎮', cost: 5,  minutes: 15 },
+  { id: 'leisure-30', name: '30 минут развлечений',   icon: '🎮', cost: 10, minutes: 30 },
+  { id: 'leisure-60', name: '60 минут развлечений',   icon: '🎮', cost: 20, minutes: 60 },
   { id: 'dinner', name: 'Ужин в ресторане',           icon: '🍽️', cost: 250 },
   { id: 'game',   name: 'Покупка игры/книги',         icon: '🎮', cost: 1100 },
   { id: 'big',    name: 'Крупная покупка/поездка',    icon: '✈️', cost: 6000 },

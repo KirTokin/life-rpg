@@ -536,3 +536,58 @@ button:focus-visible,
 
   .hero-card { max-width: 240px; }
 }
+/* ===== Развлечения ===== */
+.leisure .debt { color: var(--ember); font-weight: bold; }
+.leisure-review {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--gold);
+  border-radius: 4px;
+  font-size: 13px;
+}
+.leisure-buy { margin-top: 10px; }
+.leisure-form {
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--gold);
+  border-radius: 6px;
+}
+.leisure-form fieldset { border: 0; margin: 0 0 10px; padding: 0; }
+.leisure-form legend { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { position: relative; }
+.chip input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.chip span, .chip-btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 14px;
+}
+.chip input:checked + span, .chip-btn.active { border-color: var(--gold); color: var(--gold); background: #2c2420; }
+.chip input:focus-visible + span { outline: 2px solid var(--gold); outline-offset: 2px; }
+.minutes-input, .end-label input {
+  min-height: 40px;
+  width: 100px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 16px;
+}
+.end-label { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; color: var(--text); }
+.end-label input { width: auto; border-radius: 4px; }
+table.leisure-week { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 13px; }
+.leisure-week th, .leisure-week td { padding: 4px 6px; text-align: left; border-bottom: 1px solid var(--border); }
+.leisure-week th { color: var(--muted); font-weight: normal; }
+.leisure-week td.muted { color: var(--muted); font-style: italic; }
+.leisure-recent { list-style: none; padding: 0; margin: 6px 0 0; }
+.leisure-recent li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.link-btn { padding: 6px 10px; font-size: 12px; color: var(--muted); }

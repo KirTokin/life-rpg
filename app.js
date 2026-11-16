@@ -81,6 +81,16 @@ function validateConfig() {
       || !(HEALTH.dayStartHour >= 0 && HEALTH.dayStartHour < 24)) {
     errors.push('HEALTH: некорректные настройки');
   }
+  LEISURE.allowanceHistory.forEach((h, i) => {
+    if (!Number.isFinite(new Date(h.from + 'T00:00:00').getTime())) errors.push(`LEISURE.allowanceHistory[${i}]: некорректная дата`);
+    if (i > 0 && !(h.from > LEISURE.allowanceHistory[i - 1].from)) errors.push('LEISURE.allowanceHistory: даты должны возрастать');
+    Object.keys(LEISURE.modes).forEach(m => {
+      if (!(Number.isInteger(h.minutes[m]) && h.minutes[m] >= 0)) errors.push(`LEISURE.allowanceHistory[${i}]: нет минут для режима ${m}`);
+    });
+  });
+  REWARDS.filter(r => r.minutes !== undefined).forEach(r => {
+    if (!Number.isInteger(r.minutes) || r.minutes <= 0) errors.push(`Награда ${r.id}: minutes — целое > 0`);
+  });
   QUESTS.filter(q => q.today).forEach(q => {
     const t = q.today;
     if (!Array.isArray(t.days) || !t.days.length || !t.days.every(d => Number.isInteger(d) && d >= 0 && d <= 6)) {
@@ -95,7 +105,7 @@ validateConfig();
 
 // ===== Локальное сохранение =====
 const STORAGE_KEY = 'life-rpg-save';
-const SAVE_VERSION = 6;
+const SAVE_VERSION = 7;
 
 // Миграции сохранения. Ключ — версия, ИЗ которой мигрируем.
 // Каждая функция переводит данные ровно на одну версию вперёд.
@@ -109,6 +119,8 @@ const MIGRATIONS = {
   // v5 → v6: новый тип записи 'care' (дела ухода за собой). Данные не меняются,
   // но старая версия игры не должна молча открывать журнал с записями, которых не понимает
   5: (data) => ({ ...data, version: 6 }),
+  // v6 → v7: тип записи 'leisure' (расход времени) и поле minutes у покупок. Данные не меняются
+  6: (data) => ({ ...data, version: 7 }),
 };
 
 // Прогоняет сохранение через цепочку миграций до текущей версии.
@@ -254,6 +266,8 @@ function isActive(e) {
   return !e.deleted;
 }
 
+const MINUTE = 60 * 1000;
+
 function isValidEntry(e) {
   if (e === null || typeof e !== 'object') return false;
   if (typeof e.id !== 'string' || !Number.isFinite(e.ts)) return false;
@@ -266,7 +280,15 @@ function isValidEntry(e) {
         && Number.isInteger(e.xp) && e.xp > 0
         && (e.gold === undefined || (Number.isInteger(e.gold) && e.gold >= 0));
     case 'purchase':
-      return typeof e.rewardId === 'string' && Number.isInteger(e.cost) && e.cost > 0;
+      return typeof e.rewardId === 'string' && Number.isInteger(e.cost) && e.cost > 0
+        && (e.minutes === undefined || (Number.isInteger(e.minutes) && e.minutes > 0));
+    case 'leisure': {
+      const minutes = (e.end - e.start) / MINUTE;
+      return Number.isInteger(e.start) && Number.isInteger(e.end)
+        && e.start % MINUTE === 0 && e.end % MINUTE === 0
+        && Number.isInteger(minutes) && minutes >= 1 && minutes <= 1440
+        && typeof e.category === 'string';
+    }
       case 'claim':
       return typeof e.achievementId === 'string' && Number.isInteger(e.gold) && e.gold >= 0;
     case 'care':
@@ -628,6 +650,9 @@ function toRow(e) {
     Object.assign(row, { quest_id: e.questId, stat: e.stat, xp: e.xp, gold: e.gold ?? null });
   } else if (type === 'purchase') {
     Object.assign(row, { reward_id: e.rewardId, cost: e.cost });
+    if (e.minutes !== undefined) row.minutes = e.minutes; // колонку шлём только когда она нужна
+  } else if (type === 'leisure') {
+    Object.assign(row, { leisure_start: e.start, leisure_end: e.end, category: e.category });
   } else if (type === 'claim') {
     Object.assign(row, { achievement_id: e.achievementId, gold: e.gold });
   } else if (type === 'care') {
@@ -644,6 +669,9 @@ function fromRow(r) {
     if (r.gold !== null) e.gold = r.gold;
   } else if (r.type === 'purchase') {
     Object.assign(e, { rewardId: r.reward_id, cost: r.cost });
+    if (r.minutes !== null && r.minutes !== undefined) e.minutes = r.minutes;
+  } else if (r.type === 'leisure') {
+    Object.assign(e, { start: Number(r.leisure_start), end: Number(r.leisure_end), category: r.category });
   } else if (r.type === 'claim') {
     Object.assign(e, { achievementId: r.achievement_id, gold: r.gold });
   } else if (r.type === 'care') {
@@ -976,6 +1004,10 @@ function buyReward(rewardId) {
     showMessage(`Магазин закрыт: здоровье ${hp} — нужно ${HEALTH.shopLockBelow} или больше`);
     return;
   }
+  if (reward.retired) {
+    showMessage('Эта позиция больше не продаётся');
+    return;
+  }
   if (before.gold < reward.cost) {
     showMessage(`Не хватает ${reward.cost - before.gold} 🪙`);
     return;
@@ -984,7 +1016,13 @@ function buyReward(rewardId) {
     showMessage(`Лимит награды исчерпан ${PERIOD_NAMES[reward.limit.period]}`);
     return;
   }
-  if (!confirm(`Купить «${reward.name}» за ${reward.cost} 🪙?`)) return;
+  const lv = reward.minutes ? getLeisure() : null;
+  if (lv && lv.balance + reward.minutes > LEISURE.maxBalance) {
+    showMessage(`Не помещается: в запасе ${lv.bought} мин, максимум ${LEISURE.maxBalance}. Золото не списано`);
+    return;
+  }
+  const effect = lv ? ` ${leisurePackEffect(reward, lv)}.` : '';
+  if (!confirm(`Купить «${reward.name}» за ${reward.cost} 🪙?${effect}`)) return;
 
   const entry = {
     id: crypto.randomUUID(),
@@ -993,7 +1031,10 @@ function buyReward(rewardId) {
     cost: reward.cost,
     ts: Date.now(),
   };
-  commit(entry, before, () => `${reward.icon} ${reward.name} куплено за ${reward.cost} 🪙. Наслаждайтесь!`);
+  if (reward.minutes) entry.minutes = reward.minutes;
+  commit(entry, before, () => lv
+    ? `${reward.name}: куплено за ${reward.cost} 🪙.${effect}`
+    : `${reward.icon} ${reward.name} куплено за ${reward.cost} 🪙. Наслаждайтесь!`);
 }
 
 function claimAchievement(achievementId) {
@@ -1024,6 +1065,9 @@ function describeEntry(e) {
   if (type === 'purchase') {
     const r = REWARDS.find(x => x.id === e.rewardId);
     return `покупку «${r ? r.name : e.rewardId}»`;
+  }
+  if (type === 'leisure') {
+    return `расход времени «${leisureCategoryName(e.category)}» ${(e.end - e.start) / MINUTE} мин`;
   }
   if (type === 'care') {
     const t = CARE_TASKS.find(x => x.id === e.taskId);
@@ -1282,18 +1326,7 @@ function render() {
   const shopLocked = health.hp < HEALTH.shopLockBelow;
   setHtml('shop', html`
     ${shopLocked ? html`<p class="shop-locked">🔒 Магазин закрыт: здоровье ${health.hp} из ${HEALTH.max}. Откроется при ${HEALTH.shopLockBelow}+ — выполняй дела ухода за собой.</p>` : ''}
-    ${REWARDS.map(r => {
-    const left = rewardLeft(r);
-    const affordable = view.gold >= r.cost;
-    const available = affordable && left > 0 && !shopLocked;
-    let note = affordable ? 'Можно купить' : `Не хватает ${r.cost - view.gold}`;
-    if (r.limit) note += ` · осталось ${PERIOD_NAMES[r.limit.period]}: ${Math.max(left, 0)}`;
-    return html`
-      <button class="quest reward" data-reward="${r.id}" ${available ? '' : 'disabled'}>
-        <span class="quest-main">${r.icon} ${r.name}<small>${note}</small></span>
-        <span class="gold">${goldLabel(r.cost)}</span>
-      </button>`;
-  })}`);
+    ${REWARDS.filter(r => !r.retired).map(r => rewardButton(r, view, health))}`);
 
     const unlockedCount = view.achievements.filter(a => a.unlocked).length;
   setHtml('achievements', html`
@@ -1316,6 +1349,7 @@ function render() {
   document.querySelectorAll('.ach-badge').forEach(el => { el.textContent = view.readyCount || ''; });
   renderToday();
   renderCare(health, view);
+  renderLeisure(view, health);
   updatePendingBadge();
   updateBackupHint();
   updateConfigWarning();
@@ -1719,6 +1753,428 @@ async function toggleCare(taskId) {
 document.getElementById('care').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-care]');
   if (btn && !btn.disabled) toggleCare(btn.dataset.care);
+});
+
+// ===== Развлечения: покупка и расход времени =====
+// Источник истины — журнал: покупки с minutes и записи 'leisure' (интервалы). Расчёт детерминированный:
+// пересекающиеся интервалы объединяются, режутся по границам дня (04:00) и по моментам покупок,
+// затем события проходят по времени. B — знаковый баланс купленных минут (минус — долг).
+function leisureCategoryName(id) {
+  return LEISURE.categories.find(c => c.id === id)?.name ?? id;
+}
+
+function leisureAllowance(dayKey) {
+  let version = LEISURE.allowanceHistory[0];
+  for (const h of LEISURE.allowanceHistory) if (h.from <= dayKey) version = h;
+  const mode = LEISURE.weekdayMode[new Date(dayKey + 'T12:00:00').getDay()];
+  return { mode, minutes: version.minutes[mode] ?? 0 };
+}
+
+// Ближайшая граница дня (04:00) строго после t
+function nextDayBoundary(t) {
+  const d = new Date(t);
+  d.setHours(HEALTH.dayStartHour, 0, 0, 0);
+  if (d.getTime() <= t) d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
+function computeLeisure(log, now) {
+  const today = careDayKey(now);
+  const active = log.filter(isActive);
+
+  // Объединение пересекающихся интервалов: одновременные игра и видео — одно время
+  const ivs = active.filter(e => entryType(e) === 'leisure').map(e => [e.start, e.end])
+    .sort((a, b) => (a[0] - b[0]) || (a[1] - b[1]));
+  const merged = [];
+  for (const [s, e] of ivs) {
+    const last = merged[merged.length - 1];
+    if (last && s <= last[1]) last[1] = Math.max(last[1], e);
+    else merged.push([s, e]);
+  }
+
+  const buys = active.filter(e => entryType(e) === 'purchase' && Number.isInteger(e.minutes))
+    .map(e => ({ t: Math.floor(e.ts / MINUTE) * MINUTE, minutes: e.minutes, id: e.id }))
+    .sort((a, b) => (a.t - b.t) || (a.id < b.id ? -1 : 1));
+
+  // Сегменты: части интервалов внутри одного дня и между покупками
+  const events = buys.map(b => ({ t: b.t, kind: 0, buy: b }));
+  for (const [s, e] of merged) {
+    const cuts = new Set([s, e]);
+    for (let b = nextDayBoundary(s); b < e; b = nextDayBoundary(b)) cuts.add(b);
+    for (const b of buys) if (b.t > s && b.t < e) cuts.add(b.t);
+    const points = [...cuts].sort((a, b) => a - b);
+    for (let i = 0; i + 1 < points.length; i++) {
+      events.push({ t: points[i], kind: 1, start: points[i], end: points[i + 1] });
+    }
+  }
+  events.sort((a, b) => (a.t - b.t) || (a.kind - b.kind)); // в одну минуту покупка раньше расхода
+
+  const days = new Map();
+  const day = (key) => {
+    if (!days.has(key)) {
+      const a = leisureAllowance(key);
+      days.set(key, { key, mode: a.mode, allowance: a.minutes, left: a.minutes,
+        minutes: 0, free: 0, charged: 0, overrun: 0, bought: 0 });
+    }
+    return days.get(key);
+  };
+
+  let balance = 0;
+  let totalOverrun = 0;
+  for (const ev of events) {
+    if (ev.kind === 0) {
+      balance += ev.buy.minutes;
+      day(careDayKey(ev.t)).bought += ev.buy.minutes;
+      continue;
+    }
+    const d = day(careDayKey(ev.start));
+    const m = (ev.end - ev.start) / MINUTE;
+    const freeUsed = Math.min(m, d.left);
+    d.left -= freeUsed;
+    const charged = m - freeUsed;
+    const overrun = Math.max(0, charged - Math.max(balance, 0));
+    balance = Math.max(-LEISURE.maxDebt, balance - charged);
+    d.minutes += m;
+    d.free += freeUsed;
+    d.charged += charged;
+    d.overrun += overrun;
+    totalOverrun += overrun;
+  }
+
+  const todayStat = day(today);
+  const tracked = active.filter(e => entryType(e) === 'leisure' || (entryType(e) === 'purchase' && Number.isInteger(e.minutes)))
+    .map(e => careDayKey(entryType(e) === 'leisure' ? e.start : e.ts)).sort();
+  return {
+    balance,
+    bought: Math.max(0, balance),
+    debt: Math.max(0, -balance),
+    today: todayStat,
+    available: todayStat.left + Math.max(0, balance),
+    days,
+    totalOverrun,
+    firstDay: tracked[0] ?? null,
+  };
+}
+
+let leisureCache = { key: null, value: null };
+function getLeisure() {
+  const now = Date.now();
+  const key = `${saveRevision}|${careDayKey(now)}`;
+  if (leisureCache.key !== key) leisureCache = { key, value: computeLeisure(save.log, now) };
+  return leisureCache.value;
+}
+
+function daysBetween(fromKey, toKey) {
+  return Math.round((new Date(toKey + 'T12:00:00') - new Date(fromKey + 'T12:00:00')) / (24 * 60 * MINUTE));
+}
+
+// Что сделает пакет: сколько долга погасит и сколько останется доступно
+function leisurePackEffect(r, lv) {
+  const after = lv.balance + r.minutes;
+  if (lv.debt === 0) return `Купленных минут станет ${after}`;
+  if (after < 0) return `Погасит ${r.minutes} мин долга, останется долг ${-after} мин`;
+  return `Погасит долг ${lv.debt} мин, станет доступно ${after} мин`;
+}
+
+function rewardButton(r, view, health) {
+  const shopLocked = health.hp < HEALTH.shopLockBelow;
+  const left = rewardLeft(r);
+  const affordable = view.gold >= r.cost;
+  let fits = true;
+  let note = affordable ? 'Можно купить' : `Не хватает ${r.cost - view.gold}`;
+  if (r.minutes) {
+    const lv = getLeisure();
+    fits = lv.balance + r.minutes <= LEISURE.maxBalance;
+    note = !fits ? `Не помещается: в запасе ${lv.bought} из ${LEISURE.maxBalance} мин`
+      : affordable ? leisurePackEffect(r, lv) : note;
+  }
+  if (r.limit) note += ` · осталось ${PERIOD_NAMES[r.limit.period]}: ${Math.max(left, 0)}`;
+  const available = affordable && left > 0 && fits && !shopLocked;
+  return html`
+    <button class="quest reward" data-reward="${r.id}" ${available ? '' : 'disabled'}>
+      <span class="quest-main">${r.icon} ${r.name}<small>${note}</small></span>
+      <span class="gold">${goldLabel(r.cost)}</span>
+    </button>`;
+}
+
+const leisureUi = { panel: null, busy: false, error: '', category: 'games', minutes: '', end: '' };
+
+function fmtMinutes(m) {
+  if (m < 60) return `${m} мин`;
+  const h = Math.floor(m / 60);
+  return m % 60 ? `${h} ч ${m % 60} мин` : `${h} ч`;
+}
+
+function fmtTime(t) {
+  return new Date(t).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+}
+
+function localInputValue(t) {
+  const d = new Date(t);
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function renderLeisure(view, health) {
+  const lv = getLeisure();
+  const today = careDayKey(Date.now());
+  const modeName = LEISURE.modes[lv.today.mode];
+
+  // Неделя наблюдения: с первой записи расхода или покупки минут
+  let reviewLine = '';
+  if (lv.firstDay) {
+    const passed = daysBetween(lv.firstDay, today);
+    const revised = LEISURE.allowanceHistory.some(h => h.from > lv.firstDay);
+    if (passed >= LEISURE.reviewAfterDays && !revised) {
+      reviewLine = html`<p class="leisure-review">Прошла неделя учёта. Посмотри сводку за 7 дней и реши, менять ли переходный запас — например, на 30 мин для одного режима. Сам он не меняется.</p>`;
+    } else if (passed < LEISURE.reviewAfterDays) {
+      reviewLine = html`<p class="today-note">Неделя наблюдения: день ${passed + 1} из ${LEISURE.reviewAfterDays}.</p>`;
+    }
+  }
+
+  // Сводка за 7 дней
+  const week = [];
+  let key = today;
+  for (let i = 0; i < 7; i++) {
+    week.push(key);
+    const d = new Date(key + 'T12:00:00');
+    d.setDate(d.getDate() - 1);
+    key = dateKey(d.getTime());
+  }
+  const weekStats = week.map(k => ({ key: k, s: lv.days.get(k) }));
+  const weekOverrun = weekStats.reduce((sum, w) => sum + (w.s?.overrun ?? 0), 0);
+  const weekBought = weekStats.reduce((sum, w) => sum + (w.s?.bought ?? 0), 0);
+
+  // Последние записи расхода и покупок минут
+  const recent = save.log.filter(e => isActive(e)
+    && (entryType(e) === 'leisure' || (entryType(e) === 'purchase' && Number.isInteger(e.minutes))))
+    .sort((a, b) => b.ts - a.ts).slice(0, 10);
+
+  setHtml('leisure', html`
+    <div class="care-head">
+      <h3>Развлечения</h3>
+      <span class="today-count">Доступно сегодня: ${fmtMinutes(lv.available)}</span>
+    </div>
+    <p class="today-note care-rule">
+      Отмечено сегодня: ${fmtMinutes(lv.today.minutes)}${lv.debt ? html` · <span class="debt">Долг к погашению: ${lv.debt} мин</span>` : ''}
+    </p>
+    ${reviewLine}
+    <div class="today-actions">
+      <button class="today-btn ${leisureUi.panel === 'buy' ? 'primary' : ''}" data-leisure-panel="buy" aria-expanded="${leisureUi.panel === 'buy' ? 'true' : 'false'}">Купить время</button>
+      <button class="today-btn ${leisureUi.panel === 'record' ? 'primary' : ''}" data-leisure-panel="record" aria-expanded="${leisureUi.panel === 'record' ? 'true' : 'false'}">Записать расход</button>
+    </div>
+    ${leisureUi.panel === 'buy' ? html`
+      <div class="leisure-buy">
+        ${health.hp < HEALTH.shopLockBelow ? html`<p class="shop-locked">Здоровье ${health.hp}: новые покупки закрыты до ${HEALTH.shopLockBelow}. Купленные минуты и переходный запас можно тратить.</p>` : ''}
+        <p class="today-note">Золото: ${view.gold} · 1 монета = 3 мин · в запасе не больше ${LEISURE.maxBalance} мин</p>
+        ${REWARDS.filter(r => r.minutes && !r.retired).map(r => rewardButton(r, view, health))}
+      </div>` : ''}`);
+
+  setHtml('leisure-details', html`
+    <details class="info" data-details="leisure-source" ${detailsAttr('leisure-source')}>
+      <summary>Откуда время и правила</summary>
+      <ul>
+        <li>Переходный запас (${modeName}): осталось ${fmtMinutes(lv.today.left)} из ${fmtMinutes(lv.today.allowance)}.</li>
+        <li>Купленные минуты: ${lv.bought} мин${lv.debt ? `; долг к погашению: ${lv.debt} мин` : ''}.</li>
+        ${lv.debt && lv.today.left ? html`<li>Переходный запас можно тратить и при долге: долг гасится только покупкой времени.</li>` : ''}
+        <li>Переходный запас — временный допуск для постепенного сокращения, не цель. Он сгорает в ${String(HEALTH.dayStartHour).padStart(2, '0')}:00 и не переносится.</li>
+        <li>Расход: сначала переходный запас, затем купленные минуты. Сверх них — долг, не больше ${LEISURE.maxDebt} мин; полный перерасход остаётся в истории. Процентов нет.</li>
+        <li>Новая покупка сначала гасит долг. Запас купленных минут — не больше ${LEISURE.maxBalance}.</li>
+        <li>Учёт ручной: сайт не следит за приложениями и ничего не блокирует. Рабочие созвоны и видео для учебного задания не записываются.</li>
+      </ul>
+    </details>
+    <details class="info" data-details="leisure-week" ${detailsAttr('leisure-week')}>
+      <summary>Последние 7 дней</summary>
+      <table class="leisure-week">
+        <thead><tr><th>День</th><th>Отмечено</th><th>Перерасход</th><th>Куплено</th></tr></thead>
+        <tbody>
+          ${weekStats.map(w => html`
+            <tr>
+              <td>${new Date(w.key + 'T12:00:00').toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'short' })}</td>
+              ${w.s?.minutes ? html`<td>${fmtMinutes(w.s.minutes)}</td>` : html`<td class="muted">Нет записей</td>`}
+              <td>${w.s?.overrun ? `${w.s.overrun} мин` : '—'}</td>
+              <td>${w.s?.bought ? `${w.s.bought} мин` : '—'}</td>
+            </tr>`)}
+        </tbody>
+      </table>
+      <p>Перерасход за 7 дней: ${weekOverrun} мин; к погашению сейчас: ${lv.debt} мин. Куплено за 7 дней: ${weekBought} мин.</p>
+    </details>
+    <details class="info" data-details="leisure-recent" ${detailsAttr('leisure-recent')}>
+      <summary>Последние записи</summary>
+      ${recent.length ? html`<ul class="leisure-recent">
+        ${recent.map(e => html`
+          <li>
+            <span>${entryType(e) === 'leisure'
+              ? `${new Date(e.start).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} ${fmtTime(e.start)}–${fmtTime(e.end)} · ${leisureCategoryName(e.category)} · ${(e.end - e.start) / MINUTE} мин`
+              : `${new Date(e.ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' })} ${fmtTime(e.ts)} · куплено ${e.minutes} мин за ${e.cost} 🪙`}</span>
+            <button class="link-btn" data-cancel-entry="${e.id}">Отменить</button>
+          </li>`)}
+      </ul>` : html`<p>Записей пока нет.</p>`}
+    </details>`);
+
+  if (leisureUi.panel === 'record' && !document.getElementById('leisure-form')) renderLeisureForm();
+  if (leisureUi.panel !== 'record') setHtml('leisure-form-box', html``);
+}
+
+// Форма расхода перерисовывается только по её собственным действиям, чтобы не сбивать ввод
+function renderLeisureForm() {
+  const maxEnd = localInputValue(Date.now());
+  setHtml('leisure-form-box', html`
+    <form id="leisure-form" class="leisure-form" novalidate>
+      <fieldset>
+        <legend>Что это было</legend>
+        <div class="chips">
+          ${LEISURE.categories.map(c => html`
+            <label class="chip"><input type="radio" name="category" value="${c.id}" ${leisureUi.category === c.id ? 'checked' : ''}><span>${c.name}</span></label>`)}
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Сколько минут</legend>
+        <div class="chips">
+          ${[15, 30, 60].map(m => html`<button type="button" class="chip-btn ${String(m) === String(leisureUi.minutes) ? 'active' : ''}" data-quick-minutes="${m}">${m}</button>`)}
+          <input class="minutes-input" type="number" name="minutes" min="1" max="${LEISURE.maxSessionMinutes}" step="1" inputmode="numeric"
+                 placeholder="своё" aria-label="Своя длительность, минут" value="${leisureUi.minutes}">
+        </div>
+      </fieldset>
+      <details class="info" data-details="leisure-end" ${detailsAttr('leisure-end') || (leisureUi.end ? 'open' : '')}>
+        <summary>Закончил не сейчас?</summary>
+        <label class="end-label">Окончание сеанса
+          <input type="datetime-local" name="end" max="${maxEnd}" value="${leisureUi.end}">
+        </label>
+      </details>
+      <p class="today-note">Фоновый просмотр тоже записывай. Игра и видео одновременно — это одно время: удобно записать одним сеансом «Смешанное». Пересекающиеся записи не удваиваются.</p>
+      ${leisureUi.error ? html`<p class="today-error" role="alert">⚠️ ${leisureUi.error}</p>` : ''}
+      <div class="today-actions">
+        <button type="submit" class="today-btn primary" ${leisureUi.busy ? 'disabled' : ''}>${leisureUi.busy ? 'Сохраняю…' : 'Сохранить'}</button>
+        <button type="button" class="today-btn" data-leisure-close>Закрыть</button>
+      </div>
+    </form>`);
+}
+
+function readLeisureForm(form) {
+  leisureUi.category = form.category.value || leisureUi.category;
+  leisureUi.minutes = form.minutes.value;
+  leisureUi.end = form.end.value;
+}
+
+async function saveLeisure(form) {
+  if (leisureUi.busy) return;
+  readLeisureForm(form);
+  const minutes = Number(leisureUi.minutes);
+  const nowMinute = Math.floor(Date.now() / MINUTE) * MINUTE;
+  let end = nowMinute;
+  if (leisureUi.end) {
+    const t = new Date(leisureUi.end).getTime();
+    end = Math.floor(t / MINUTE) * MINUTE;
+  }
+  let error = '';
+  if (!LEISURE.categories.some(c => c.id === leisureUi.category)) error = 'Выбери, что это было.';
+  else if (!Number.isInteger(minutes) || minutes < 1 || minutes > LEISURE.maxSessionMinutes) error = `Длительность — целое число минут от 1 до ${LEISURE.maxSessionMinutes}.`;
+  else if (!Number.isFinite(end)) error = 'Не удалось прочитать время окончания.';
+  else if (end > nowMinute) error = 'Окончание не может быть в будущем.';
+  if (error) {
+    leisureUi.error = error;
+    renderLeisureForm();
+    return;
+  }
+
+  leisureUi.busy = true;
+  leisureUi.error = '';
+  renderLeisureForm();
+  absorbDisk();
+  const before = getLeisure();
+  const entry = {
+    id: crypto.randomUUID(), type: 'leisure', category: leisureUi.category,
+    start: end - minutes * MINUTE, end, ts: Date.now(), synced: false,
+  };
+  save.log.push(entry);
+  const ok = await storage.save(save);
+  leisureUi.busy = false;
+  if (!ok) {
+    const i = save.log.indexOf(entry);
+    if (i !== -1) save.log.splice(i, 1);
+    saveRevision++;
+    leisureUi.error = 'Запись не сохранилась на устройстве. Данные формы на месте — нажми «Сохранить» ещё раз.';
+    renderLeisureForm();
+    render();
+    return;
+  }
+  Object.assign(leisureUi, { panel: null, error: '', minutes: '', end: '' });
+  render();
+  const after = getLeisure();
+  let msg = `Записано: ${leisureCategoryName(entry.category)} · ${minutes} мин (${fmtTime(entry.start)}–${fmtTime(entry.end)}). Сохранено на устройстве`;
+  if (after.debt > before.debt) msg += ` · долг к погашению: ${after.debt} мин`;
+  showMessage(msg);
+  sync();
+}
+
+// Отмена конкретной записи (расход или покупка минут): помечается удалённой, итог пересчитывается
+async function cancelEntry(id) {
+  const e = save.log.find(x => x.id === id && isActive(x));
+  if (!e) return;
+  if (!confirm(`Отменить ${describeEntry(e)}?`)) return;
+  const prevSynced = e.synced;
+  e.deleted = true;
+  e.synced = false;
+  if (!(await storage.save(save))) {
+    e.deleted = false;
+    e.synced = prevSynced;
+    saveRevision++;
+    render();
+    showMessage('⚠️ Не удалось сохранить отмену. Попробуйте ещё раз.');
+    return;
+  }
+  render();
+  showMessage('Запись отменена');
+  sync();
+}
+
+document.getElementById('leisure-wrap').addEventListener('click', (e) => {
+  const panelBtn = e.target.closest('[data-leisure-panel]');
+  if (panelBtn) {
+    const panel = panelBtn.dataset.leisurePanel;
+    leisureUi.panel = leisureUi.panel === panel ? null : panel;
+    leisureUi.error = '';
+    render();
+    if (leisureUi.panel === 'record') document.querySelector('#leisure-form input[name="category"]:checked')?.focus();
+    return;
+  }
+  const reward = e.target.closest('[data-reward]');
+  if (reward && !reward.disabled) {
+    buyReward(reward.dataset.reward);
+    return;
+  }
+  const cancel = e.target.closest('[data-cancel-entry]');
+  if (cancel) cancelEntry(cancel.dataset.cancelEntry);
+});
+
+const leisureFormBox = document.getElementById('leisure-form-box');
+leisureFormBox.addEventListener('click', (e) => {
+  const quick = e.target.closest('[data-quick-minutes]');
+  if (quick) {
+    const form = document.getElementById('leisure-form');
+    readLeisureForm(form);
+    leisureUi.minutes = quick.dataset.quickMinutes;
+    renderLeisureForm();
+    return;
+  }
+  if (e.target.closest('[data-leisure-close]')) {
+    leisureUi.panel = null;
+    leisureUi.error = '';
+    render();
+  }
+});
+leisureFormBox.addEventListener('input', (e) => {
+  const form = e.target.form;
+  if (!form) return;
+  readLeisureForm(form);
+  if (e.target.name === 'minutes') {
+    form.querySelectorAll('[data-quick-minutes]').forEach(b => b.classList.toggle('active', b.dataset.quickMinutes === form.minutes.value));
+  }
+});
+leisureFormBox.addEventListener('submit', (e) => {
+  e.preventDefault();
+  saveLeisure(e.target);
 });
 
 // ===== Раздел «Сегодня» =====
