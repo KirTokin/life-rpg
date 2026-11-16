@@ -91,13 +91,11 @@ function validateConfig() {
   REWARDS.filter(r => r.minutes !== undefined).forEach(r => {
     if (!Number.isInteger(r.minutes) || r.minutes <= 0) errors.push(`Награда ${r.id}: minutes — целое > 0`);
   });
-  QUESTS.filter(q => q.today).forEach(q => {
-    const t = q.today;
-    if (!Array.isArray(t.days) || !t.days.length || !t.days.every(d => Number.isInteger(d) && d >= 0 && d <= 6)) {
-      errors.push(`Квест ${q.id}: today.days — массив дней недели 0–6`);
-    }
-    if (!t.firstStep || !t.done) errors.push(`Квест ${q.id}: today.firstStep и today.done обязательны`);
-    if (q.limit?.period !== 'day' || q.limit?.max !== 1) errors.push(`Квест ${q.id}: карточке «Сегодня» нужен лимит 1 в день`);
+  const rules = PLAN.versions[PLAN.rulesVersion];
+  if (!rules) errors.push('PLAN: нет правил для rulesVersion');
+  else Object.entries(rules.questDirs).forEach(([qid, dir]) => {
+    if (!questIds.has(qid)) errors.push(`PLAN: неизвестный квест ${qid}`);
+    if (!PLAN.directions[dir]) errors.push(`PLAN: неизвестное направление ${dir}`);
   });
   errors.forEach(e => console.error('Ошибка конфига:', e));
 }
@@ -105,7 +103,7 @@ validateConfig();
 
 // ===== Локальное сохранение =====
 const STORAGE_KEY = 'life-rpg-save';
-const SAVE_VERSION = 7;
+const SAVE_VERSION = 8;
 
 // Миграции сохранения. Ключ — версия, ИЗ которой мигрируем.
 // Каждая функция переводит данные ровно на одну версию вперёд.
@@ -121,6 +119,8 @@ const MIGRATIONS = {
   5: (data) => ({ ...data, version: 6 }),
   // v6 → v7: тип записи 'leisure' (расход времени) и поле minutes у покупок. Данные не меняются
   6: (data) => ({ ...data, version: 7 }),
+  // v7 → v8: события планировщика 'plan' и метаданные выполнения квеста (payload). Данные не меняются
+  7: (data) => ({ ...data, version: 8 }),
 };
 
 // Прогоняет сохранение через цепочку миграций до текущей версии.
@@ -267,6 +267,22 @@ function isActive(e) {
 }
 
 const MINUTE = 60 * 1000;
+// Операции планировщика и пределы длины текста (объявлены до загрузки сохранения)
+const PLAN_OPS = new Set(['activate', 'project-create', 'project-set', 'project-archive',
+  'stage-add', 'stage-set', 'stage-done', 'stage-remove', 'pick-add', 'pick-remove']);
+const NAME_MAX = 200;
+const NOTE_MAX = 2000;
+
+// Метаданные выполнения квеста: игровой день, версия правил, сессия, карточка, проект/этап, снимок названий
+function validQuestPayload(p) {
+  if (!p || typeof p !== 'object' || Array.isArray(p)) return false;
+  const optStr = (v, max = 64) => v === undefined || v === null || (typeof v === 'string' && v.length <= max);
+  return /^\d{4}-\d{2}-\d{2}$/.test(p.gameDay ?? '')
+    && (p.rv === undefined || Number.isInteger(p.rv))
+    && optStr(p.sessionId) && optStr(p.pickId) && optStr(p.projectId) && optStr(p.stageId) && optStr(p.dir)
+    && (p.names === undefined || (typeof p.names === 'object' && p.names !== null
+      && optStr(p.names.project, 200) && optStr(p.names.stage, 200)));
+}
 
 function isValidEntry(e) {
   if (e === null || typeof e !== 'object') return false;
@@ -278,7 +294,10 @@ function isValidEntry(e) {
     case 'quest':
       return typeof e.questId === 'string' && typeof e.stat === 'string'
         && Number.isInteger(e.xp) && e.xp > 0
-        && (e.gold === undefined || (Number.isInteger(e.gold) && e.gold >= 0));
+        && (e.gold === undefined || (Number.isInteger(e.gold) && e.gold >= 0))
+        && (e.payload === undefined || validQuestPayload(e.payload));
+    case 'plan':
+      return validPlanPayload(e.payload);
     case 'purchase':
       return typeof e.rewardId === 'string' && Number.isInteger(e.cost) && e.cost > 0
         && (e.minutes === undefined || (Number.isInteger(e.minutes) && e.minutes > 0));
@@ -508,8 +527,10 @@ function computeState(log) {
 
   const careDays = fullCareDays(log);
   gold += careDays.length * HEALTH.fullDayGold;
+  const plan = computePlan(log, Date.now());
+  gold += plan.bonusGold;
 
-  const view = { hero, stats, totalXp, quests, purchases, careFullDays: careDays.length, careDaysList: careDays };
+  const view = { hero, stats, totalXp, quests, purchases, careFullDays: careDays.length, careDaysList: careDays, plan };
   view.achievements = ACHIEVEMENTS.map(a => {
     const result = evaluateCondition(a.condition, view);
     const claim = claims.get(a.id);
@@ -535,9 +556,11 @@ function computeState(log) {
 let stateCache = { revision: -1, view: null };
 
 // Состояние героя с кэшем: пересчёт только если журнал изменился
+// Ключ включает игровой день: бонусы и поправки плана зависят от смены дня
 function getState() {
-  if (stateCache.revision !== saveRevision) {
-    stateCache = { revision: saveRevision, view: computeState(save.log) };
+  const key = `${saveRevision}|${gameDayKey(Date.now())}`;
+  if (stateCache.revision !== key) {
+    stateCache = { revision: key, view: computeState(save.log) };
   }
   return stateCache.view;
 }
@@ -547,20 +570,24 @@ let countsCache = { key: null, day: null, week: null };
 
 // Один проход по журналу: сколько раз каждый квест/награда выполнены сегодня и за неделю.
 // Кэш зависит от ревизии журнала И от начала текущих суток/недели (после полуночи — пересчёт).
+// Границы — игровой день 04:00–04:00 и неделя с понедельника 04:00.
 function periodCounts() {
-  const dayStart = periodStart('day');
-  const weekStart = periodStart('week');
-  const key = `${saveRevision}|${dayStart}|${weekStart}`;
+  const today = gameDayKey(Date.now());
+  const thisWeek = weekKeyOf(today);
+  const key = `${saveRevision}|${today}`;
   if (countsCache.key === key) return countsCache;
 
   const day = new Map();
   const week = new Map();
+  const horizon = Date.now() - 9 * DAY_MS;
   for (const e of save.log) {
-    if (!isActive(e) || e.ts < weekStart) continue; // начало недели всегда не позже начала суток
+    if (!isActive(e) || e.ts < horizon) continue;
     const type = entryType(e);
     if (type !== 'quest' && type !== 'purchase') continue; // у забора наград лимитов нет
+    const d = type === 'quest' ? entryGameDay(e) : gameDayKey(e.ts);
+    if (weekKeyOf(d) !== thisWeek) continue;
     const id = type === 'quest' ? `quest:${e.questId}` : `purchase:${e.rewardId}`;
-    if (e.ts >= dayStart) day.set(id, (day.get(id) ?? 0) + 1);
+    if (d === today) day.set(id, (day.get(id) ?? 0) + 1);
     week.set(id, (week.get(id) ?? 0) + 1);
   }
   countsCache = { key, day, week };
@@ -648,6 +675,9 @@ function toRow(e) {
   const row = { id: e.id, type, ts: e.ts, deleted: !!e.deleted };
   if (type === 'quest') {
     Object.assign(row, { quest_id: e.questId, stat: e.stat, xp: e.xp, gold: e.gold ?? null });
+    if (e.payload !== undefined) row.payload = e.payload; // колонку шлём только когда она нужна
+  } else if (type === 'plan') {
+    row.payload = e.payload;
   } else if (type === 'purchase') {
     Object.assign(row, { reward_id: e.rewardId, cost: e.cost });
     if (e.minutes !== undefined) row.minutes = e.minutes; // колонку шлём только когда она нужна
@@ -667,6 +697,9 @@ function fromRow(r) {
   if (r.type === 'quest') {
     Object.assign(e, { questId: r.quest_id, stat: r.stat, xp: r.xp });
     if (r.gold !== null) e.gold = r.gold;
+    if (r.payload !== null && r.payload !== undefined) e.payload = r.payload;
+  } else if (r.type === 'plan') {
+    e.payload = r.payload;
   } else if (r.type === 'purchase') {
     Object.assign(e, { rewardId: r.reward_id, cost: r.cost });
     if (r.minutes !== null && r.minutes !== undefined) e.minutes = r.minutes;
@@ -725,6 +758,7 @@ function limitFor(e) {
 // Ключ периода записи: дата дня или дата понедельника её недели
 function bucketOf(e, period) {
   if (period === 'care') return careDayKey(e.ts);
+  if (e.payload?.gameDay) return period === 'day' ? e.payload.gameDay : weekKeyOf(e.payload.gameDay);
   if (period === 'day') return dateKey(e.ts);
   const d = new Date(e.ts);
   d.setHours(0, 0, 0, 0);
@@ -736,13 +770,33 @@ function bucketOf(e, period) {
 // Оставляет самые ранние; правило одинаково на всех устройствах.
 // Возвращает число отменённых записей.
 function enforceLimits(addedEntries) {
+  let cancelled = 0;
+  // Одна сессия — одно выполнение и одна награда (завершение на двух устройствах или вкладках)
+  const sessions = new Set(addedEntries.filter(e => isActive(e) && e.payload?.sessionId).map(e => e.payload.sessionId));
+  if (sessions.size) {
+    const bySession = new Map();
+    for (const e of save.log) {
+      if (!isActive(e) || entryType(e) !== 'quest' || !sessions.has(e.payload?.sessionId)) continue;
+      if (!bySession.has(e.payload.sessionId)) bySession.set(e.payload.sessionId, []);
+      bySession.get(e.payload.sessionId).push(e);
+    }
+    for (const list of bySession.values()) {
+      list.sort((a, b) => (a.ts - b.ts) || (a.id < b.id ? -1 : 1));
+      for (const e of list.slice(1)) {
+        e.deleted = true;
+        e.synced = false;
+        cancelled++;
+      }
+    }
+  }
+
   const touched = new Set();
   for (const e of addedEntries) {
     if (!isActive(e)) continue;
     const info = limitFor(e);
     if (info) touched.add(`${info.key}|${bucketOf(e, info.limit.period)}`);
   }
-  if (!touched.size) return 0;
+  if (!touched.size) return cancelled;
 
   const groups = new Map();
   for (const e of save.log) {
@@ -755,12 +809,12 @@ function enforceLimits(addedEntries) {
     groups.get(bucket).entries.push(e);
   }
 
-  let cancelled = 0;
   for (const { max, entries } of groups.values()) {
     if (entries.length <= max) continue;
     // Сначала по времени, при равенстве — по id. Простое сравнение строк, без учёта языка браузера.
     entries.sort((a, b) => (a.ts - b.ts) || (a.id < b.id ? -1 : 1));
-    for (const e of entries.slice(max)) {
+    // У квестов отменяются только новые записи (с игровым днём): старые закрытые периоды не трогаем
+    for (const e of entries.slice(max).filter(x => entryType(x) !== 'quest' || x.payload?.gameDay)) {
       e.deleted = true;
       e.synced = false;
       cancelled++;
@@ -939,6 +993,14 @@ async function commit(entry, before, baseMessage) {
     );
   }
 
+  // Минимумы плана: бонус дня и недели (только при действии, не при загрузке)
+  const today = gameDayKey(Date.now());
+  const r = after.plan.rules;
+  if (after.plan.bonusDays.has(today) && !before.plan.bonusDays.has(today)) msg += ` · Дневной минимум выполнен · ещё +${r.dayBonus} монет`;
+  if (after.plan.bonusDays.size < before.plan.bonusDays.size) msg += ' · Дневной минимум больше не выполнен';
+  const wk = weekKeyOf(today);
+  if (after.plan.bonusWeeks.has(wk) && !before.plan.bonusWeeks.has(wk)) msg += ` · Недельный минимум выполнен · ещё +${r.weekBonus} монет`;
+
   // Ачивки, открывшиеся этим действием: эффекта нет, только сообщение
   after.achievements.forEach((a, i) => {
     if (!a.unlocked || before.achievements[i].unlocked) return;
@@ -952,14 +1014,20 @@ async function commit(entry, before, baseMessage) {
   return true;
 }
 
-// Выполнение квеста. Возвращает 'saved', 'limit' или 'error'.
-async function completeQuest(questId) {
+// Выполнение квеста. Возвращает 'saved', 'limit', 'dup' или 'error'.
+// meta: { sessionId, pickId, projectId, stageId, names, label } — для подходов из «Сегодня».
+async function completeQuest(questId, meta = {}) {
   const quest = QUESTS.find(q => q.id === questId);
   if (!quest) {
     console.error('Квест не найден:', questId);
     return 'error';
   }
   absorbDisk(); // учесть выполнения из других вкладок до проверки лимита
+  if (meta.sessionId && sessionDone(meta.sessionId)) {
+    showMessage('Этот подход уже засчитан');
+    render();
+    return 'dup';
+  }
   if (questLeft(quest) <= 0) {
     showMessage(`Лимит исчерпан ${PERIOD_NAMES[quest.limit.period]}`);
     render();
@@ -977,10 +1045,18 @@ async function completeQuest(questId) {
     gold,
     ts: Date.now(),
   };
+  const rules = planRules();
+  const payload = {
+    gameDay: gameDayKey(entry.ts), rv: PLAN.rulesVersion, sessionId: meta.sessionId ?? crypto.randomUUID(),
+    dir: rules.questDirs[quest.id] ?? null,
+  };
+  for (const k of ['pickId', 'projectId', 'stageId']) if (meta[k]) payload[k] = meta[k];
+  if (meta.names?.project) payload.names = { project: meta.names.project.slice(0, 200), stage: (meta.names.stage ?? '').slice(0, 200) };
+  entry.payload = payload;
 
   const ok = await commit(entry, before, (after) => {
     const statConf = STATS.find(s => s.id === quest.stat);
-    let msg = `+${quest.xp} XP, +${gold} 🪙 → ${statConf.name}`;
+    let msg = `${meta.label ?? quest.name} · +${quest.xp} XP, +${gold} монет`;
     if (after.stats[quest.stat].level > before.stats[quest.stat].level) {
       msg += ` · ${statConf.name}: ур. ${after.stats[quest.stat].level}!`;
     }
@@ -1077,12 +1153,15 @@ function describeEntry(e) {
     const a = ACHIEVEMENTS.find(x => x.id === e.achievementId);
     return `получение награды за ачивку «${a ? a.name : e.achievementId}»`;
   }
+  if (type === 'plan') return `изменение плана (${e.payload?.op})`;
+  if (e.payload?.names?.project) return `подход «${e.payload.names.project} › ${e.payload.names.stage}»`;
   const q = QUESTS.find(x => x.id === e.questId);
   return `квест «${q ? q.name : e.questId}»`;
 }
 
 async function undoLast() {
-  const last = [...save.log].reverse().find(isActive);
+  // События планировщика (проекты, выбор на день, активация) отменяются в своих местах, не здесь
+  const last = [...save.log].reverse().find(e => isActive(e) && entryType(e) !== 'plan');
   if (!last) {
     showMessage('Нечего отменять');
     return;
@@ -1298,30 +1377,31 @@ function render() {
   })}`);
 
   // Квадратики статов: иконка, название, число доступных сегодня квестов
+  const projectsTab = ui.questStat === 'projects';
   const questStat = STATS.find(s => s.id === ui.questStat) ?? STATS[0];
+  const activeProjects = [...getProjects().values()].filter(p => !p.archived).length;
   setHtml('quest-tabs', html`${STATS.map(s => {
-    const available = QUESTS.filter(q => !q.today && q.stat === s.id && questLeft(q) > 0).length;
+    const available = QUESTS.filter(q => q.stat === s.id && questLeft(q) > 0).length;
     return html`
-      <button class="stat-tab ${s.id === questStat.id ? 'active' : ''}" style="--c: ${s.color}"
+      <button class="stat-tab ${!projectsTab && s.id === questStat.id ? 'active' : ''}" style="--c: ${s.color}"
               data-quest-stat="${s.id}" title="${s.name}">
         ${iconImg(s.icon, 'stat-tab-icon')}
         <span class="stat-tab-name">${s.name}</span>
         <span class="stat-tab-count">${available}</span>
       </button>`;
-  })}`);
+  })}
+    <button class="stat-tab tasks-tab ${projectsTab ? 'active' : ''}" style="--c: var(--gold)" data-quest-stat="projects" title="Мои задачи">
+      <span class="stat-tab-icon tasks-icon" aria-hidden="true">☰</span>
+      <span class="stat-tab-name">Мои задачи</span>
+      <span class="stat-tab-count">${activeProjects || ''}</span>
+    </button>`);
 
   // Квесты выбранного стата
-  setHtml('quests', html`${QUESTS.filter(q => !q.today && q.stat === questStat.id).map(q => {
-    const left = Math.max(questLeft(q), 0);
-    return html`
-      <button class="quest" style="--c: ${questStat.color}" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>
-        ${iconImg(q.icon ?? questStat.icon)}
-        <span class="quest-main">${q.name}
-          <small>${q.goal} · осталось ${PERIOD_NAMES[q.limit.period]}: ${left}</small>
-        </span>
-        <span>+${q.xp}</span>
-      </button>`;
-  })}`);
+  const picksToday = picksForDay(gameDayKey(Date.now()));
+  document.getElementById('quests').hidden = projectsTab;
+  document.getElementById('projects-box').hidden = !projectsTab;
+  if (projectsTab) renderProjects();
+  else setHtml('quests', html`${QUESTS.filter(q => q.stat === questStat.id).map(q => renderCatalogRow(q, questStat, view.plan.rules, picksToday))}`);
 
   const shopLocked = health.hp < HEALTH.shopLockBelow;
   setHtml('shop', html`
@@ -1516,7 +1596,7 @@ function applyFolds() {
     section.querySelectorAll('[data-fold]').forEach(b => b.setAttribute('aria-expanded', open ? 'true' : 'false'));
   });
 }
-if (!STATS.some(s => s.id === ui.questStat)) ui.questStat = STATS[0].id;
+if (ui.questStat !== 'projects' && !STATS.some(s => s.id === ui.questStat)) ui.questStat = STATS[0].id;
 
 function saveUi() {
   try {
@@ -1807,6 +1887,7 @@ function nextDayBoundary(t) {
 
 function computeLeisure(log, now) {
   const today = careDayKey(now);
+  const plan = computePlan(log, now);
   const active = log.filter(isActive);
 
   // Объединение пересекающихся интервалов: одновременные игра и видео — одно время
@@ -1840,7 +1921,10 @@ function computeLeisure(log, now) {
   const day = (key) => {
     if (!days.has(key)) {
       const a = leisureAllowance(key);
-      days.set(key, { key, mode: a.mode, allowance: a.minutes, left: a.minutes,
+      // Поправка плана за пропущенные минимумы — к своему историческому дню
+      const pen = planPenalty(plan, key);
+      const allowance = Math.max(0, a.minutes - pen.total);
+      days.set(key, { key, mode: a.mode, base: a.minutes, penalty: pen, allowance, left: allowance,
         minutes: 0, free: 0, charged: 0, overrun: 0, bought: 0 });
     }
     return days.get(key);
@@ -2005,6 +2089,7 @@ function renderLeisure(view, health) {
       <summary>Откуда время и правила</summary>
       <ul>
         <li>Переходный запас (${modeName}): осталось ${fmtMinutes(lv.today.left)} из ${fmtMinutes(lv.today.allowance)}.</li>
+        ${lv.today.penalty.total ? html`<li>Базовый запас ${lv.today.base} − ${lv.today.penalty.total} за ${[lv.today.penalty.daily ? 'вчерашний минимум' : '', lv.today.penalty.weekly ? 'недельный минимум' : ''].filter(Boolean).join(' и ')} = ${lv.today.allowance} мин.</li>` : ''}
         <li>Купленные минуты: ${lv.bought} мин${lv.debt ? `; долг к погашению: ${lv.debt} мин` : ''}.</li>
         ${lv.debt && lv.today.left ? html`<li>Переходный запас можно тратить и при долге: долг гасится только покупкой времени.</li>` : ''}
         <li>Переходный запас — временный допуск для постепенного сокращения, не цель. Он сгорает в ${String(HEALTH.dayStartHour).padStart(2, '0')}:00 и не переносится.</li>
@@ -2207,25 +2292,312 @@ leisureFormBox.addEventListener('submit', (e) => {
   saveLeisure(e.target);
 });
 
-// ===== Раздел «Сегодня» =====
-// Выполнено ли — считается только по журналу (активные записи за текущую локальную дату).
-// Начатая карточка — локальный черновик интерфейса: не влияет на прогресс, не синхронизируется.
+// ===== Игровой день и неделя =====
+// Единые границы для плана, новых выполнений, их лимитов и развлечений: день 04:00–04:00, неделя с пн 04:00.
+function gameDayKey(ts) {
+  return careDayKey(ts);
+}
+
+function addDays(dayKey, n) {
+  const d = new Date(dayKey + 'T12:00:00'); // полдень: переход на летнее время не сдвинет дату
+  d.setDate(d.getDate() + n);
+  return dateKey(d.getTime());
+}
+
+function weekdayOf(dayKey) {
+  return new Date(dayKey + 'T12:00:00').getDay();
+}
+
+function weekKeyOf(dayKey) {
+  return addDays(dayKey, -((weekdayOf(dayKey) + 6) % 7));
+}
+
+// Игровой день выполнения: сохранённый в записи (новые записи), иначе по 04:00
+function entryGameDay(e) {
+  return e.payload?.gameDay ?? gameDayKey(e.ts);
+}
+
+function fmtDay(dayKey, opts = { day: 'numeric', month: 'long' }) {
+  return new Date(dayKey + 'T12:00:00').toLocaleDateString('ru-RU', opts);
+}
+
+// ===== План: правила и минимумы (чистые функции от журнала) =====
+function planRules(rv = PLAN.rulesVersion) {
+  return PLAN.versions[rv];
+}
+
+function questDir(e, rules) {
+  return e.payload?.dir ?? rules.questDirs[e.questId] ?? null;
+}
+
+function planEvents(log) {
+  return log.filter(e => isActive(e) && entryType(e) === 'plan')
+    .sort((a, b) => (a.ts - b.ts) || (a.id < b.id ? -1 : 1));
+}
+
+// Самая ранняя активация текущей версии правил (после слияния устройств)
+function findActivation(log) {
+  return planEvents(log).find(e => e.payload.op === 'activate' && e.payload.rv === PLAN.rulesVersion) ?? null;
+}
+
+function requiredDaily(dayKey, rules) {
+  return rules.workdays.includes(weekdayOf(dayKey)) ? rules.daily.workday : rules.daily.weekend;
+}
+
+// Минимумы, бонусы и поправки к переходному запасу. Не обращается к getState: без циклов gold → plan → leisure → gold.
+function computePlan(log, now) {
+  const today = gameDayKey(now);
+  const rules = planRules();
+  const act = findActivation(log);
+  const empty = {
+    active: false, today, firstDay: null, firstWeek: null, rules,
+    dirsByDay: new Map(), bonusDays: new Set(), bonusWeeks: new Set(), bonusGold: 0,
+    dailyMissed: new Map(), weeklyMissed: new Map(), weeks: new Map(),
+  };
+  // Выполненные направления по игровым дням (нужны и до активации — для подсказок)
+  const dirsByDay = new Map();
+  for (const e of log) {
+    if (!isActive(e) || entryType(e) !== 'quest') continue;
+    const dir = questDir(e, rules);
+    if (!dir) continue;
+    const d = entryGameDay(e);
+    if (!dirsByDay.has(d)) dirsByDay.set(d, new Set());
+    dirsByDay.get(d).add(dir);
+  }
+  empty.dirsByDay = dirsByDay;
+  if (!act) return empty;
+
+  const actDay = gameDayKey(act.ts);
+  const firstDay = addDays(actDay, 1);              // ознакомительный день не обязателен
+  const firstWeek = addDays(weekKeyOf(actDay), 7);  // первый понедельник после дня активации
+  const bonusDays = new Set();
+  const dailyMissed = new Map(); // день → невыполненные направления (для дней до сегодня)
+  for (let d = firstDay; d <= today; d = addDays(d, 1)) {
+    const done = dirsByDay.get(d) ?? new Set();
+    const missing = requiredDaily(d, rules).filter(x => !done.has(x));
+    if (!missing.length) bonusDays.add(d);
+    else if (d < today) dailyMissed.set(d, missing);
+  }
+
+  const bonusWeeks = new Set();
+  const weeklyMissed = new Map(); // понедельник, к которому применяется поправка → невыполненные
+  const weeks = new Map();
+  for (let w = firstWeek; w <= today; w = addDays(w, 7)) {
+    const status = {};
+    for (const [dir, need] of Object.entries(rules.weekly)) {
+      let days = 0;
+      for (let k = 0; k < 7; k++) {
+        const d = addDays(w, k);
+        if (d > today) break;
+        if (dirsByDay.get(d)?.has(dir)) days++;
+      }
+      status[dir] = { days, need };
+    }
+    weeks.set(w, status);
+    const missing = Object.entries(status).filter(([, s]) => s.days < s.need).map(([dir]) => dir);
+    if (!missing.length) bonusWeeks.add(w);
+    else if (addDays(w, 7) <= today) weeklyMissed.set(addDays(w, 7), missing);
+  }
+
+  return {
+    ...empty, active: true, activation: act, actDay, firstDay, firstWeek, dirsByDay,
+    bonusDays, bonusWeeks, dailyMissed, weeklyMissed, weeks,
+    bonusGold: bonusDays.size * rules.dayBonus + bonusWeeks.size * rules.weekBonus,
+  };
+}
+
+// Поправка к переходному запасу развлечений для игрового дня
+function planPenalty(plan, dayKey) {
+  const r = plan.rules;
+  const dMiss = plan.dailyMissed.get(addDays(dayKey, -1)) ?? [];
+  const wMiss = plan.weeklyMissed.get(dayKey) ?? [];
+  const daily = Math.min(r.dailyPenaltyMax, dMiss.length * r.dailyPenalty);
+  const weekly = Math.min(r.weeklyPenaltyMax, wMiss.length * r.weeklyPenalty);
+  return { daily, weekly, total: Math.min(r.totalPenaltyMax, daily + weekly), dMiss, wMiss };
+}
+
+let planCache = { key: null, value: null };
+function getPlan() {
+  const now = Date.now();
+  const key = `${saveRevision}|${gameDayKey(now)}`;
+  if (planCache.key !== key) planCache = { key, value: computePlan(save.log, now) };
+  return planCache.value;
+}
+
+// ===== Проекты, этапы и выбор на день: свёртка событий 'plan' =====
+
+function validName(v) {
+  return typeof v === 'string' && v.trim().length > 0 && v.length <= NAME_MAX;
+}
+
+function validPlanPayload(p) {
+  if (!p || typeof p !== 'object' || !PLAN_OPS.has(p.op)) return false;
+  const id = v => typeof v === 'string' && v.length > 0 && v.length <= 64;
+  const stage = s => s && id(s.stageId) && validName(s.name) && Number.isFinite(s.pos)
+    && (s.note === undefined || (typeof s.note === 'string' && s.note.length <= NOTE_MAX));
+  switch (p.op) {
+    case 'activate': return Number.isInteger(p.rv);
+    case 'project-create':
+      return id(p.projectId) && validName(p.name) && Array.isArray(p.stages) && p.stages.length <= 100 && p.stages.every(stage);
+    case 'project-set': return id(p.projectId) && p.field === 'name' && validName(p.value);
+    case 'project-archive': return id(p.projectId) && typeof p.archived === 'boolean';
+    case 'stage-add': return id(p.projectId) && stage(p);
+    case 'stage-set':
+      return id(p.projectId) && id(p.stageId) && (
+        (p.field === 'name' && validName(p.value))
+        || (p.field === 'note' && typeof p.value === 'string' && p.value.length <= NOTE_MAX)
+        || (p.field === 'pos' && Number.isFinite(p.value)));
+    case 'stage-done': return id(p.projectId) && id(p.stageId) && typeof p.done === 'boolean';
+    case 'stage-remove': return id(p.projectId) && id(p.stageId);
+    case 'pick-add':
+      return id(p.pickId) && /^\d{4}-\d{2}-\d{2}$/.test(p.day) && p.ref && (
+        (p.ref.kind === 'quest' && id(p.ref.questId))
+        || (p.ref.kind === 'stage' && id(p.ref.projectId) && id(p.ref.stageId)));
+    case 'pick-remove': return id(p.pickId);
+    default: return false;
+  }
+}
+
+// Проекты из событий. Порядок: создания проектов, затем добавления этапов, затем изменения;
+// внутри — по (ts, id). Так изменение с другого устройства не теряется из-за расхождения часов.
+function computeProjects(log) {
+  const phase = op => op === 'project-create' ? 0 : op === 'stage-add' ? 1 : 2;
+  const evs = planEvents(log).filter(e => !e.payload.op.startsWith('pick') && e.payload.op !== 'activate')
+    .sort((a, b) => (phase(a.payload.op) - phase(b.payload.op)) || (a.ts - b.ts) || (a.id < b.id ? -1 : 1));
+  const projects = new Map();
+  const addStage = (proj, s) => {
+    if (proj.stages.has(s.stageId)) return;
+    proj.stages.set(s.stageId, { id: s.stageId, name: s.name, note: s.note ?? '', pos: s.pos, done: false, removed: false });
+  };
+  for (const e of evs) {
+    const p = e.payload;
+    const proj = projects.get(p.projectId);
+    const st = proj?.stages.get(p.stageId);
+    switch (p.op) {
+      case 'project-create':
+        if (proj) break;
+        projects.set(p.projectId, { id: p.projectId, name: p.name, archived: false, created: e.ts, stages: new Map() });
+        p.stages.forEach(s => addStage(projects.get(p.projectId), s));
+        break;
+      case 'project-set': if (proj) proj.name = p.value; break;
+      case 'project-archive': if (proj) proj.archived = p.archived; break;
+      case 'stage-add': if (proj) addStage(proj, p); break;
+      case 'stage-set': if (st) st[p.field] = p.value; break;
+      case 'stage-done': if (st) st.done = p.done; break;
+      case 'stage-remove': if (st) st.removed = true; break;
+    }
+  }
+  for (const proj of projects.values()) {
+    proj.list = [...proj.stages.values()].filter(s => !s.removed)
+      .sort((a, b) => (a.pos - b.pos) || (a.id < b.id ? -1 : 1));
+    proj.doneCount = proj.list.filter(s => s.done).length;
+    proj.complete = proj.list.length > 0 && proj.doneCount === proj.list.length;
+  }
+  return projects;
+}
+
+let projectsCache = { revision: -1, value: null };
+function getProjects() {
+  if (projectsCache.revision !== saveRevision) projectsCache = { revision: saveRevision, value: computeProjects(save.log) };
+  return projectsCache.value;
+}
+
+function refKey(ref) {
+  return ref.kind === 'quest' ? `quest:${ref.questId}` : `stage:${ref.stageId}`;
+}
+
+// Карточки плана на день: ссылки на квест или этап. Одна карточка на квест/этап; самая ранняя побеждает.
+function picksForDay(dayKey) {
+  const evs = planEvents(save.log);
+  const removed = new Set(evs.filter(e => e.payload.op === 'pick-remove').map(e => e.payload.pickId));
+  const projects = getProjects();
+  const seen = new Set();
+  const picks = [];
+  for (const e of evs) {
+    const p = e.payload;
+    if (p.op !== 'pick-add' || p.day !== dayKey || removed.has(p.pickId)) continue;
+    const k = refKey(p.ref);
+    if (seen.has(k)) continue;
+    if (p.ref.kind === 'quest' && !QUESTS.some(q => q.id === p.ref.questId)) continue;
+    if (p.ref.kind === 'stage') {
+      const proj = projects.get(p.ref.projectId);
+      const st = proj?.stages.get(p.ref.stageId);
+      if (!proj || proj.archived || !st || st.removed) continue; // архив и удаление убирают из плана
+    }
+    seen.add(k);
+    picks.push({ pickId: p.pickId, ref: p.ref, ts: e.ts });
+  }
+  return picks;
+}
+
+function questCompletions(dayKey) {
+  return save.log.filter(e => isActive(e) && entryType(e) === 'quest' && entryGameDay(e) === dayKey);
+}
+
+// ===== Запись событий плана =====
+async function writePlanEvent(payload, okMessage) {
+  const entry = { id: crypto.randomUUID(), type: 'plan', payload: { ...payload, v: 1 }, ts: Date.now(), synced: false };
+  if (!validPlanPayload(entry.payload)) {
+    showMessage('⚠️ Некорректные данные — проверьте название (до 200 символов) и заметку (до 2000).');
+    return false;
+  }
+  save.log.push(entry);
+  const ok = await storage.save(save);
+  if (!ok) {
+    const i = save.log.indexOf(entry);
+    if (i !== -1) save.log.splice(i, 1);
+    saveRevision++;
+    render();
+    showMessage('⚠️ Не удалось сохранить на устройстве. Введённое осталось в форме — попробуйте ещё раз.');
+    return false;
+  }
+  render();
+  if (okMessage) showMessage(okMessage);
+  sync();
+  return true;
+}
+
+// Несколько связанных событий одной записью (например, перестановка двух этапов)
+async function writePlanEvents(payloads, okMessage) {
+  const entries = payloads.map((p, i) => ({ id: crypto.randomUUID(), type: 'plan', payload: { ...p, v: 1 }, ts: Date.now() + i, synced: false }));
+  if (!entries.every(e => validPlanPayload(e.payload))) return false;
+  save.log.push(...entries);
+  const ok = await storage.save(save);
+  if (!ok) {
+    save.log = save.log.filter(e => !entries.includes(e));
+    saveRevision++;
+    render();
+    showMessage('⚠️ Не удалось сохранить на устройстве. Попробуйте ещё раз.');
+    return false;
+  }
+  render();
+  if (okMessage) showMessage(okMessage);
+  sync();
+  return true;
+}
+
+// Активация правил при первом открытии этой версии (без сообщения и вне «Отменить»)
+async function ensureActivation() {
+  if (findActivation(save.log)) return;
+  const entry = { id: crypto.randomUUID(), type: 'plan', payload: { op: 'activate', rv: PLAN.rulesVersion, v: 1 }, ts: Date.now(), synced: false };
+  save.log.push(entry);
+  if (!(await storage.save(save))) {
+    const i = save.log.indexOf(entry);
+    if (i !== -1) save.log.splice(i, 1);
+    saveRevision++;
+    return;
+  }
+  render();
+  sync();
+}
+
+// ===== Сессии (подходы): локальный черновик интерфейса =====
+// Начатый подход не даёт наград и не синхронизируется. Завершение создаёт одно выполнение с sessionId.
 const DRAFT_KEY = 'life-rpg-today-draft';
-const DRAFT_VERSION = 1;
-let todayError = null; // { questId, text } — ошибка записи, показывается в карточке
-let todayBusy = false; // защита от двойного нажатия «Завершить»
-let todayDateShown = dateKey(Date.now());
-
-function todayQuests() {
-  const weekday = new Date().getDay();
-  return QUESTS.filter(q => q.today && q.today.days.includes(weekday));
-}
-
-function doneToday(questId) {
-  const today = dateKey(Date.now());
-  return save.log.find(e => isActive(e) && entryType(e) === 'quest'
-    && e.questId === questId && dateKey(e.ts) === today) ?? null;
-}
+const DRAFT_VERSION = 2;
+let todayError = null;   // { pickId, text }
+let todayBusy = false;
+let todayDateShown = gameDayKey(Date.now());
 
 function clearTodayDraft() {
   try {
@@ -2235,7 +2607,10 @@ function clearTodayDraft() {
   }
 }
 
-// Активный черновик: только этого дня, этого владельца, для карточки, доступной сегодня и ещё не выполненной
+function sessionDone(sessionId) {
+  return save.log.some(e => isActive(e) && entryType(e) === 'quest' && e.payload?.sessionId === sessionId);
+}
+
 function activeDraft() {
   let d = null;
   try {
@@ -2244,11 +2619,13 @@ function activeDraft() {
     return null;
   }
   if (!d) return null;
-  const valid = d.v === DRAFT_VERSION
-    && d.date === dateKey(Date.now())
-    && d.owner === save.ownerId
-    && todayQuests().some(q => q.id === d.questId)
-    && !doneToday(d.questId);
+  let valid = d.v === DRAFT_VERSION && d.owner === save.ownerId && !sessionDone(d.sessionId)
+    && QUESTS.some(q => q.id === d.questId);
+  if (valid && d.stageId) {
+    const proj = getProjects().get(d.projectId);
+    const st = proj?.stages.get(d.stageId);
+    valid = Boolean(proj && !proj.archived && st && !st.removed);
+  }
   if (!valid) {
     clearTodayDraft();
     return null;
@@ -2256,147 +2633,628 @@ function activeDraft() {
   return d;
 }
 
-function startToday(questId) {
-  if (!todayQuests().some(q => q.id === questId) || doneToday(questId)) {
-    render();
-    return;
-  }
+const READING = ['read-start-10', 'read'];
+const WORK_QUEST = 'work-focus-20';
+
+function startSession(pick) {
   const current = activeDraft();
-  if (current && current.questId !== questId) {
-    const q = QUESTS.find(x => x.id === current.questId);
-    showMessage(`Сначала заверши или отложи «${q.name}»`);
+  if (current) {
+    showMessage(current.pickId === pick.pickId ? 'Подход уже начат' : 'Сначала заверши или отложи начатый подход');
     return;
   }
+  const questId = pick.ref.kind === 'stage' ? WORK_QUEST : pick.ref.questId;
+  const quest = QUESTS.find(q => q.id === questId);
+  const readingLeft = READING.includes(questId) && READING.some(id => questLeft(QUESTS.find(q => q.id === id)) > 0);
+  if (questLeft(quest) <= 0 && !readingLeft) {
+    showMessage(questId === WORK_QUEST ? `Наградные подходы на сегодня исчерпаны (${quest.limit.max} из ${quest.limit.max})` : 'Лимит этого квеста на сегодня исчерпан');
+    return;
+  }
+  const draft = {
+    v: DRAFT_VERSION, owner: save.ownerId, sessionId: crypto.randomUUID(), pickId: pick.pickId, questId,
+    projectId: pick.ref.projectId, stageId: pick.ref.stageId, startedDay: gameDayKey(Date.now()), startedAt: Date.now(),
+  };
   try {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({
-      v: DRAFT_VERSION, owner: save.ownerId, questId, date: dateKey(Date.now()), startedAt: Date.now(),
-    }));
+    localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
   } catch (e) {
-    showMessage('⚠️ Не удалось запомнить начало — но можно просто начать и потом нажать «Завершить»');
+    showMessage('⚠️ Не удалось запомнить начало на устройстве');
+    return;
   }
   todayError = null;
   render();
-  focusToday(questId, 'finish');
+  focusPick(pick.pickId, 'finish');
 }
 
-function laterToday(questId) {
+function laterSession(pickId) {
   const d = activeDraft();
-  if (d?.questId === questId) clearTodayDraft();
+  if (d?.pickId === pickId) clearTodayDraft();
   todayError = null;
   render();
-  focusToday(questId, 'start');
+  focusPick(pickId, 'start');
 }
 
-async function finishToday(questId) {
+async function finishSession(pickId, questId) {
   if (todayBusy) return;
   const d = activeDraft();
-  if (!d || d.questId !== questId) {
-    // день сменился, карточку отменили или уже выполнили в другом месте
+  if (!d || d.pickId !== pickId) {
     render();
-    showMessage(doneToday(questId) ? 'Уже выполнено сегодня' : 'Начни карточку заново — день сменился');
+    showMessage('Подход уже завершён или отложен');
+    return;
+  }
+  const today = gameDayKey(Date.now());
+  if (d.startedDay !== today
+      && !confirm(`Подход начат ${fmtDay(d.startedDay)}, а сейчас уже ${fmtDay(today)}. Он будет засчитан за ${fmtDay(today)}. Подтвердить?`)) {
     return;
   }
   todayBusy = true;
   render();
-  const result = await completeQuest(questId);
+  const projects = getProjects();
+  const proj = d.projectId ? projects.get(d.projectId) : null;
+  const st = proj?.stages.get(d.stageId);
+  const result = await completeQuest(questId ?? d.questId, {
+    sessionId: d.sessionId, pickId: d.pickId, projectId: d.projectId, stageId: d.stageId,
+    names: proj ? { project: proj.name, stage: st?.name } : undefined,
+    label: proj ? 'Подход завершён' : undefined,
+  });
   todayBusy = false;
-  if (result === 'saved') {
+  if (result === 'saved' || result === 'dup') {
     clearTodayDraft();
     todayError = null;
   } else if (result === 'error') {
-    todayError = { questId, text: 'Результат не сохранился на устройстве. Награда не начислена.' };
+    todayError = { pickId, text: 'Результат не сохранился на устройстве. Награда не начислена.' };
   }
   render();
-  focusToday(questId, result === 'error' ? 'finish' : null);
+  focusPick(pickId, result === 'error' ? 'finish' : null);
 }
 
-function focusToday(questId, action) {
-  const card = document.querySelector(`[data-today-card="${questId}"]`);
+function focusPick(pickId, action) {
+  const card = document.querySelector(`[data-pick-card="${pickId}"]`);
   if (!card) return;
-  const target = (action && card.querySelector(`[data-today-action="${action}"]`)) || card;
+  const target = (action && card.querySelector(`[data-pick-action="${action}"]`)) || card;
   target.focus();
 }
 
-function renderToday() {
-  const cards = todayQuests();
-  const draft = activeDraft();
-  const doneCount = cards.filter(q => doneToday(q.id)).length;
-  const dateLabel = new Date().toLocaleDateString('ru-RU', { weekday: 'long', day: 'numeric', month: 'long' });
-  const activeQuest = draft ? QUESTS.find(q => q.id === draft.questId) : null;
-  todayDateShown = dateKey(Date.now());
+// ===== Выбор на сегодня =====
+async function addPick(ref, day = gameDayKey(Date.now())) {
+  absorbDisk();
+  if (picksForDay(day).some(p => refKey(p.ref) === refKey(ref))) {
+    showMessage('Уже в плане на сегодня');
+    return false;
+  }
+  return writePlanEvent({ op: 'pick-add', pickId: crypto.randomUUID(), day, ref }, 'Добавлено в план на сегодня');
+}
 
-  document.getElementById('today-date').textContent = dateLabel;
+async function removePick(pickId) {
+  const d = activeDraft();
+  if (d?.pickId === pickId) clearTodayDraft();
+  return writePlanEvent({ op: 'pick-remove', pickId }, 'Убрано из плана. Выполненное остаётся в истории');
+}
+
+async function setStageDone(projectId, stageId, done) {
+  const proj = getProjects().get(projectId);
+  const st = proj?.stages.get(stageId);
+  if (!st || st.done === done) return;
+  const ok = await writePlanEvent({ op: 'stage-done', projectId, stageId, done });
+  if (ok) {
+    const p = getProjects().get(projectId);
+    showMessage(done ? `Этап завершён · ${p.doneCount} из ${p.list.length}` : `Этап снова в работе · ${p.doneCount} из ${p.list.length}`);
+  }
+}
+
+// ===== Раздел «Задачи дня» =====
+function dirName(dir) {
+  return PLAN.directions[dir] ?? dir;
+}
+
+function pickDir(pick, rules) {
+  return pick.ref.kind === 'stage' ? 'work' : rules.questDirs[pick.ref.questId] ?? null;
+}
+
+// Незавершённые вчерашние карточки, которых нет сегодня
+function carryOverPicks(today) {
+  const yesterday = addDays(today, -1);
+  const doneQuests = new Set(questCompletions(yesterday).map(e => e.questId));
+  const todayKeys = new Set(picksForDay(today).map(p => refKey(p.ref)));
+  const projects = getProjects();
+  return picksForDay(yesterday).filter(p => {
+    if (todayKeys.has(refKey(p.ref))) return false;
+    if (p.ref.kind === 'quest') return !doneQuests.has(p.ref.questId);
+    return !projects.get(p.ref.projectId)?.stages.get(p.ref.stageId)?.done;
+  });
+}
+
+function pickTitle(pick) {
+  if (pick.ref.kind === 'quest') return QUESTS.find(q => q.id === pick.ref.questId)?.name ?? pick.ref.questId;
+  const proj = getProjects().get(pick.ref.projectId);
+  return `${proj?.name ?? '?'} › ${proj?.stages.get(pick.ref.stageId)?.name ?? '?'}`;
+}
+
+function renderTodayMinimums(plan, today, picks) {
+  const rules = plan.rules;
+  const done = plan.dirsByDay.get(today) ?? new Set();
+  const covered = new Set(picks.map(p => pickDir(p, rules)).filter(Boolean));
+  const required = requiredDaily(today, rules);
+  const dailyOn = plan.active && today >= plan.firstDay;
+  const weekOn = plan.active && today >= plan.firstWeek;
+  const pen = plan.active ? planPenalty(plan, today) : { total: 0 };
+  const week = weekOn ? plan.weeks.get(weekKeyOf(today)) : null;
+  const daysLeft = 7 - (weekdayOf(today) + 6) % 7;
+
+  const chip = (dir, ok, label) => html`<span class="min-chip ${ok ? 'ok' : covered.has(dir) ? 'planned' : ''}">${ok ? '✓' : covered.has(dir) ? '◐' : '○'} ${label}</span>`;
+  return html`
+    <div class="minimums">
+      ${!plan.active ? html`<p class="today-note">Правила плана ещё не активированы на этом устройстве.</p>` : ''}
+      ${plan.active && !dailyOn ? html`<p class="today-note">Обязательные минимумы начнутся: дневные — с ${fmtDay(plan.firstDay)}, недельные — с ${fmtDay(plan.firstWeek)}. Сегодня квесты дают обычные награды.</p>` : ''}
+      <div class="min-row">
+        <span class="min-label">${dailyOn ? 'Минимум дня:' : 'Ориентир дня:'}</span>
+        ${required.map(dir => chip(dir, done.has(dir), dirName(dir)))}
+      </div>
+      ${pen.total ? html`<p class="penalty-line">Вчера не выполнено: ${pen.dMiss.map(dirName).join(', ')}${pen.wMiss.length ? `${pen.dMiss.length ? '; ' : ''}за прошлую неделю: ${pen.wMiss.map(dirName).join(', ')}` : ''}. Сегодня переходный запас меньше на ${pen.total} мин.</p>` : ''}
+      <details class="info" data-details="plan-week" ${detailsAttr('plan-week')}>
+        <summary>Неделя${week ? ` · ${Object.values(week).filter(s => s.days >= s.need).length}/${Object.keys(week).length}` : ''}</summary>
+        ${weekOn ? html`
+          <ul>
+            ${Object.entries(week).map(([dir, s]) => html`<li>${s.days >= s.need ? '✓' : '○'} ${dirName(dir)}: ${Math.min(s.days, s.need)}/${s.need} ${s.need > 1 ? 'дня' : 'день'}${s.days >= s.need ? '' : `, осталось дней в неделе: ${daysLeft}`}</li>`)}
+          </ul>` : html`<p>Недельные минимумы начнутся с ${plan.firstWeek ? fmtDay(plan.firstWeek) : 'следующего понедельника'}.</p>`}
+        <ul>
+          <li>Бонус дня: +${rules.dayBonus} монет за все дневные направления (пн–пт — работа и чтение/обучение, сб–вс — чтение/обучение).</li>
+          <li>Бонус недели: +${rules.weekBonus} монет — физическая активность 2 разных дня, творчество 1 день, общение/речь 1 день.</li>
+          <li>Пропуск дневного направления: −${rules.dailyPenalty} мин переходного запаса на следующий день (не больше ${rules.dailyPenaltyMax}); недельного — −${rules.weeklyPenalty} мин в следующий понедельник (не больше ${rules.weeklyPenaltyMax}); всего не больше ${rules.totalPenaltyMax} мин. HP, золото и купленные минуты не меняются.</li>
+          <li>◐ — направление есть в плане, ✓ — выполнено. Выполнение без плана тоже засчитывается.</li>
+        </ul>
+      </details>
+    </div>`;
+}
+
+function renderPickCard(pick, ctx) {
+  const { draft, today, rules } = ctx;
+  const isStage = pick.ref.kind === 'stage';
+  const questId = isStage ? WORK_QUEST : pick.ref.questId;
+  const quest = QUESTS.find(q => q.id === questId);
+  const stat = STATS.find(s => s.id === quest.stat);
+  const dir = pickDir(pick, rules);
+  const comps = questCompletions(today);
+  const active = draft?.pickId === pick.pickId;
+  const blocked = Boolean(draft) && !active;
+  const error = todayError?.pickId === pick.pickId ? todayError.text : '';
+  const gold = Math.round(quest.xp * BALANCE.goldPerXp);
+  const workLeft = Math.max(questLeft(QUESTS.find(q => q.id === WORK_QUEST)), 0);
+  const g = quest.guide ?? {};
+  let proj = null;
+  let st = null;
+  let count = 0;
+  let state = 'ready';
+  let doneLine = '';
+  let canStart = true;
+  if (isStage) {
+    proj = getProjects().get(pick.ref.projectId);
+    st = proj.stages.get(pick.ref.stageId);
+    count = comps.filter(e => e.payload?.stageId === st.id).length;
+    canStart = workLeft > 0;
+    if (st.done) state = 'done';
+  } else {
+    count = comps.filter(e => e.questId === questId).length;
+    const left = Math.max(questLeft(quest), 0);
+    const readingLeft = READING.includes(questId) && READING.some(id => questLeft(QUESTS.find(q => q.id === id)) > 0);
+    canStart = left > 0 || readingLeft;
+    if (count > 0 && !canStart) state = 'done';
+    doneLine = count ? `сегодня ${count} из ${quest.limit.max}` : '';
+  }
+  if (active) state = 'active';
+
+  let finishButtons;
+  if (active && READING.includes(questId)) {
+    finishButtons = READING.map(id => {
+      const q = QUESTS.find(x => x.id === id);
+      const ok = questLeft(q) > 0;
+      return html`<button class="today-btn primary" data-pick-action="finish" data-finish-quest="${id}" data-pick-id="${pick.pickId}" ${ok && !todayBusy ? '' : 'disabled'}>
+        Завершить: ${id === 'read' ? '30' : '10'} минут${ok ? '' : ' (лимит)'}</button>`;
+    });
+  } else {
+    finishButtons = html`<button class="today-btn primary" data-pick-action="finish" data-pick-id="${pick.pickId}" ${todayBusy ? 'disabled' : ''}>
+      ${todayBusy ? 'Сохраняю…' : error ? 'Повторить сохранение' : isStage ? 'Завершить подход' : 'Завершить'}</button>`;
+  }
+
+  return html`
+    <article class="today-card ${state}" style="--c: ${stat.color}" data-pick-card="${pick.pickId}" tabindex="-1">
+      <header class="today-card-head">
+        ${iconImg(stat.icon)}
+        <h3>${isStage ? `${proj.name} › ${st.name}` : quest.name}</h3>
+        <span class="today-reward">+${quest.xp} XP · ${goldLabel(gold)}</span>
+      </header>
+      <p class="today-meta">
+        ${dir ? html`<span class="dir-tag">${dirName(dir)}</span>` : ''}
+        ${isStage ? html` Этапов готово: ${proj.doneCount} из ${proj.list.length} · подходов к этапу сегодня: ${count} · наградных подходов: ${quest.limit.max - workLeft} из ${quest.limit.max}` : doneLine}
+      </p>
+      ${active && draft.startedDay !== today ? html`<p class="today-error">Подход начат ${fmtDay(draft.startedDay)} — будет засчитан за ${fmtDay(today)}.</p>` : ''}
+      ${state === 'done' && !isStage ? html`<p class="today-done" role="status">✓ Выполнено</p>` : ''}
+      ${state === 'done' && isStage ? html`<p class="today-done" role="status">✓ Этап готов</p>` : ''}
+      ${state !== 'done' && g.firstStep ? html`<p class="today-step"><b>${active ? 'Сейчас:' : 'Первый шаг:'}</b> ${g.firstStep}</p>` : ''}
+      ${state !== 'done' && g.done ? html`<p class="today-line"><b>Готово, когда:</b> ${g.done}</p>` : ''}
+      ${state !== 'done' && g.example ? html`<p class="today-line"><b>Например:</b> ${g.example}</p>` : ''}
+      ${st?.note ? html`<p class="today-line"><b>Заметка:</b> ${st.note}</p>` : ''}
+      ${active && g.hint ? html`<p class="today-hint">${g.hint}</p>` : ''}
+      ${!active && g.note && state !== 'done' ? html`<p class="today-note">${g.note}</p>` : ''}
+      ${error ? html`<p class="today-error" role="alert">⚠️ ${error}</p>` : ''}
+      <div class="today-actions">
+        ${active ? html`
+          ${finishButtons}
+          <button class="today-btn" data-pick-action="later" data-pick-id="${pick.pickId}" ${todayBusy ? 'disabled' : ''}>Вернуться позже</button>
+        ` : state !== 'done' || isStage ? html`
+          <button class="today-btn primary" data-pick-action="start" data-pick-id="${pick.pickId}" ${blocked || !canStart ? 'disabled' : ''}>
+            ${isStage ? 'Начать подход' : count ? 'Новый подход' : 'Начать'}</button>
+        ` : ''}
+        ${isStage ? html`<button class="today-btn" data-pick-action="stage-done" data-pick-id="${pick.pickId}">${st.done ? 'Вернуть этап в работу' : 'Этап готов'}</button>` : ''}
+      </div>
+      ${isStage && !canStart && !active ? html`<p class="today-note">Наградные подходы на сегодня исчерпаны (${quest.limit.max} из ${quest.limit.max}). Этапы можно отмечать и редактировать.</p>` : ''}
+      ${blocked && state !== 'done' ? html`<p class="today-note">Сначала заверши или отложи начатый подход.</p>` : ''}
+      <button class="link-btn pick-remove" data-pick-action="remove" data-pick-id="${pick.pickId}">Убрать из плана</button>
+    </article>`;
+}
+
+function renderToday() {
+  const now = Date.now();
+  const today = gameDayKey(now);
+  todayDateShown = today;
+  const plan = getPlan();
+  const rules = plan.rules;
+  const picks = picksForDay(today);
+  const draft = activeDraft();
+  const comps = questCompletions(today);
+  const carry = carryOverPicks(today);
+  const required = requiredDaily(today, rules);
+  const doneDirs = plan.dirsByDay.get(today) ?? new Set();
+  const minDone = required.filter(d => doneDirs.has(d)).length;
+  const covered = new Set(picks.map(p => pickDir(p, rules)).filter(Boolean));
+  const missingDirs = required.filter(d => !doneDirs.has(d) && !covered.has(d));
+
+  // Выполнения сегодня, не представленные карточками
+  const pickedQuests = new Set(picks.filter(p => p.ref.kind === 'quest').map(p => p.ref.questId));
+  const pickedStages = new Set(picks.filter(p => p.ref.kind === 'stage').map(p => p.ref.stageId));
+  const extra = comps.filter(e => e.payload?.stageId ? !pickedStages.has(e.payload.stageId) : !pickedQuests.has(e.questId));
+
+  document.getElementById('today-date').textContent = fmtDay(today, { weekday: 'long', day: 'numeric', month: 'long' });
   setHtml('today', html`
     <h3 class="fold-title"><button class="fold-head" data-fold="tasks" aria-expanded="true" aria-controls="fold-body-tasks">
-        <span class="fold-arrow" aria-hidden="true"></span>
-        <span class="fold-name">Задачи дня</span>
-        <span class="fold-sum">Выполнено: ${doneCount} из ${cards.length}</span>
-      </button></h3>
+      <span class="fold-arrow" aria-hidden="true"></span>
+      <span class="fold-name">Задачи дня</span>
+      <span class="fold-sum">Выполнено: ${comps.length} · минимум ${minDone === required.length ? '✓' : `${minDone}/${required.length}`}</span>
+    </button></h3>
     <div class="fold-body" id="fold-body-tasks">
-    ${cards.map(q => {
-      const stat = STATS.find(s => s.id === q.stat);
-      const gold = Math.round(q.xp * BALANCE.goldPerXp);
-      const done = doneToday(q.id);
-      const active = draft?.questId === q.id;
-      const blocked = !done && !active && Boolean(draft);
-      const error = todayError?.questId === q.id ? todayError.text : '';
-      const t = q.today;
-      const state = done ? 'done' : active ? 'active' : 'ready';
-      return html`
-        <article class="today-card ${state}" style="--c: ${stat.color}" data-today-card="${q.id}" tabindex="-1">
-          <header class="today-card-head">
-            ${iconImg(stat.icon)}
-            <h3>${q.name}</h3>
-            <span class="today-reward">+${q.xp} XP · ${goldLabel(gold)}</span>
-          </header>
-          ${done ? html`
-            <p class="today-done" role="status">✓ Выполнено · начислено +${done.xp} XP и ${goldLabel(questGold(done, BALANCE))}</p>
-          ` : html`
-            <p class="today-step"><b>${active ? 'Сейчас:' : 'Первый шаг:'}</b> ${t.firstStep}</p>
-            <p class="today-line"><b>Готово, когда:</b> ${t.done}</p>
-            ${t.example ? html`<p class="today-line"><b>Например:</b> ${t.example}</p>` : ''}
-            ${active ? html`<p class="today-hint">${t.hint}</p>` : ''}
-            ${t.note ? html`<p class="today-note">${t.note}</p>` : ''}
-            ${error ? html`<p class="today-error" role="alert">⚠️ ${error}</p>` : ''}
-            <div class="today-actions">
-              ${active ? html`
-                <button class="today-btn primary" data-today-action="finish" data-quest-id="${q.id}" ${todayBusy ? 'disabled' : ''}>
-                  ${todayBusy ? 'Сохраняю…' : error ? 'Повторить сохранение' : 'Завершить'}
-                </button>
-                <button class="today-btn" data-today-action="later" data-quest-id="${q.id}" ${todayBusy ? 'disabled' : ''}>Вернуться позже</button>
-              ` : html`
-                <button class="today-btn primary" data-today-action="start" data-quest-id="${q.id}" ${blocked ? 'disabled' : ''}>Начать</button>
-              `}
-            </div>
-            ${blocked ? html`<p class="today-note">Сначала заверши или отложи «${activeQuest.name}».</p>` : ''}
-          `}
-        </article>`;
-    })}
+      ${renderTodayMinimums(plan, today, picks)}
+      ${carry.length ? html`
+        <div class="carry">
+          <p class="today-note">Вчера не завершено: ${carry.length}. Перенести на сегодня?</p>
+          ${carry.map(p => html`<div class="carry-row"><span>${pickTitle(p)}</span>
+            <button class="link-btn" data-carry='${p.pickId}'>Перенести</button></div>`)}
+          ${carry.length > 1 ? html`<button class="link-btn" data-carry-all>Перенести все</button>` : ''}
+        </div>` : ''}
+      ${picks.length ? picks.map(p => renderPickCard(p, { draft, today, rules })) : html`
+        <p class="today-note">План на сегодня пуст.${missingDirs.length ? ` Не хватает: ${missingDirs.map(dirName).join(', ')}.` : ''}</p>`}
+      ${extra.length ? html`
+        <div class="extra-done">
+          <p class="today-note">Выполнено вне плана:</p>
+          <ul>${extra.map(e => html`<li>✓ ${e.payload?.names?.project ? `${e.payload.names.project} › ${e.payload.names.stage}` : (QUESTS.find(q => q.id === e.questId)?.name ?? e.questId)}</li>`)}</ul>
+        </div>` : ''}
+      <div class="today-actions">
+        <button class="today-btn" data-go-catalog>Выбрать квесты</button>
+      </div>
     </div>`);
 }
 
 document.getElementById('today').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-today-action]');
-  if (!btn || btn.disabled) return;
-  const id = btn.dataset.questId;
-  const action = btn.dataset.todayAction;
-  if (action === 'start') startToday(id);
-  else if (action === 'later') laterToday(id);
-  else if (action === 'finish') finishToday(id);
+  const btn = e.target.closest('[data-pick-action]');
+  if (btn && !btn.disabled) {
+    const pick = picksForDay(gameDayKey(Date.now())).find(p => p.pickId === btn.dataset.pickId);
+    const action = btn.dataset.pickAction;
+    if (action === 'later') { laterSession(btn.dataset.pickId); return; }
+    if (action === 'finish') { finishSession(btn.dataset.pickId, btn.dataset.finishQuest); return; }
+    if (!pick) { render(); return; }
+    if (action === 'start') startSession(pick);
+    else if (action === 'remove') removePick(pick.pickId);
+    else if (action === 'stage-done') {
+      const st = getProjects().get(pick.ref.projectId)?.stages.get(pick.ref.stageId);
+      if (st) setStageDone(pick.ref.projectId, pick.ref.stageId, !st.done);
+    }
+    return;
+  }
+  const carry = e.target.closest('[data-carry]');
+  if (carry) {
+    const p = carryOverPicks(gameDayKey(Date.now())).find(x => x.pickId === carry.dataset.carry);
+    if (p) addPick(p.ref);
+    return;
+  }
+  if (e.target.closest('[data-carry-all]')) {
+    const today = gameDayKey(Date.now());
+    const list = carryOverPicks(today);
+    writePlanEvents(list.map(p => ({ op: 'pick-add', pickId: crypto.randomUUID(), day: today, ref: p.ref })), `Перенесено: ${list.length}`);
+    return;
+  }
+  if (e.target.closest('[data-go-catalog]')) {
+    ui.screen = 'quests';
+    saveUi();
+    applyUi();
+    document.querySelector('.quests-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
 });
 
-// Смена дня при открытой вкладке: раз в 30 секунд проверяем дату
+// Смена игрового дня при открытой вкладке: раз в 30 секунд проверяем
 setInterval(() => {
-  if (dateKey(Date.now()) !== todayDateShown || careDayKey(Date.now()) !== careDayShown) {
+  if (gameDayKey(Date.now()) !== todayDateShown || careDayKey(Date.now()) !== careDayShown) {
     todayError = null;
     render();
   }
 }, 30 * 1000);
 
+// ===== Каталог и «Мои задачи» =====
+let questCooldown = new Map(); // защита от двойного клика «Выполнить» в каталоге
+
+function renderCatalogRow(q, stat, rules, picksToday) {
+  const left = Math.max(questLeft(q), 0);
+  const dir = rules.questDirs[q.id];
+  const picked = picksToday.some(p => p.ref.kind === 'quest' && p.ref.questId === q.id);
+  const gold = Math.round(q.xp * BALANCE.goldPerXp);
+  return html`
+    <div class="quest catalog-row" style="--c: ${stat.color}">
+      ${iconImg(q.icon ?? stat.icon)}
+      <span class="quest-main">${q.name}
+        <small>${dir ? html`<span class="dir-tag">${dirName(dir)}</span> ` : ''}ориентир: ${q.goal} · +${q.xp} XP, ${gold} 🪙 · осталось ${PERIOD_NAMES[q.limit.period]}: ${left}</small>
+      </span>
+      <span class="catalog-actions">
+        <button class="small-btn" data-pick-quest="${q.id}" ${picked ? 'disabled' : ''}>${picked ? 'В плане' : 'На сегодня'}</button>
+        <button class="small-btn primary" data-quest="${q.id}" ${left === 0 ? 'disabled' : ''}>Выполнить</button>
+      </span>
+    </div>`;
+}
+
+const projUi = { create: { open: false, name: '', template: '', stages: '' }, edit: null, addStage: {}, pendingRender: false };
+
+function renderProjects() {
+  const box = document.getElementById('projects-box');
+  if (!box) return;
+  // Не перерисовывать, пока пользователь печатает: перерисуем, когда фокус уйдёт
+  if (box.contains(document.activeElement) && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName)) {
+    projUi.pendingRender = true;
+    return;
+  }
+  projUi.pendingRender = false;
+  const today = gameDayKey(Date.now());
+  const picks = picksForDay(today);
+  const all = [...getProjects().values()].sort((a, b) => (a.created - b.created) || (a.id < b.id ? -1 : 1));
+  const activeProjects = all.filter(p => !p.archived);
+  const archived = all.filter(p => p.archived);
+  const c = projUi.create;
+  const ed = projUi.edit;
+  const editing = (kind, projectId, stageId) => ed && ed.kind === kind && ed.projectId === projectId && (ed.stageId ?? null) === (stageId ?? null);
+  const editForm = (label, multiline) => html`
+    <form class="inline-edit" data-edit-form>
+      <label class="sr-only" for="edit-input">${label}</label>
+      ${multiline
+        ? html`<textarea id="edit-input" name="value" maxlength="${NOTE_MAX}" rows="3">${ed.value}</textarea>`
+        : html`<input id="edit-input" name="value" maxlength="${NAME_MAX}" value="${ed.value}" required>`}
+      <button class="small-btn primary" type="submit">Сохранить</button>
+      <button class="small-btn" type="button" data-edit-cancel>Отмена</button>
+    </form>`;
+
+  setHtml('projects-box', html`
+    <p class="today-note">Рабочие задачи и их этапы. Работа над этапом — подход «Рабочий фокус — 20 минут»: до ${QUESTS.find(q => q.id === WORK_QUEST).limit.max} наградных подходов в день на все задачи вместе.</p>
+    ${c.open ? html`
+      <form class="project-create" data-create-form>
+        <label>Название задачи
+          <input name="name" maxlength="${NAME_MAX}" required value="${c.name}" placeholder="Например: Подготовить отчёт">
+        </label>
+        <label>Этапы
+          <select name="template">
+            <option value="" ${c.template === '' ? 'selected' : ''}>Пустой список</option>
+            ${TASK_TEMPLATES.map(t => html`<option value="${t.id}" ${c.template === t.id ? 'selected' : ''}>Шаблон: ${t.name}</option>`)}
+          </select>
+        </label>
+        <label>Названия этапов — по одному в строке (можно изменить)
+          <textarea name="stages" rows="5" placeholder="Пусто — будет один этап «Выполнить задачу»">${c.stages}</textarea>
+        </label>
+        <div class="today-actions">
+          <button class="today-btn primary" type="submit">Сохранить задачу</button>
+          <button class="today-btn" type="button" data-create-cancel>Отмена</button>
+        </div>
+      </form>` : html`<button class="today-btn primary" data-create-open>+ Новая задача</button>`}
+    ${activeProjects.length ? '' : html`<p class="today-note">Активных задач пока нет.</p>`}
+    ${activeProjects.map(p => html`
+      <section class="project ${p.complete ? 'complete' : ''}">
+        <header class="project-head">
+          ${editing('project', p.id) ? editForm('Название задачи', false) : html`
+            <h4>${p.name}</h4>
+            <button class="small-btn" data-proj-action="rename" data-project-id="${p.id}">Переименовать</button>`}
+        </header>
+        <p class="today-note">${p.doneCount} из ${p.list.length} этапов завершено${p.complete ? ' · задача выполнена' : ''}</p>
+        <ol class="stages">
+          ${p.list.map((s, i) => {
+            const picked = picks.some(x => x.ref.kind === 'stage' && x.ref.stageId === s.id);
+            return html`
+              <li class="stage ${s.done ? 'done' : ''}">
+                ${editing('stage', p.id, s.id) ? editForm('Название этапа', false) : html`
+                  <span class="stage-name">${s.done ? '✓ ' : ''}${s.name}</span>`}
+                ${editing('note', p.id, s.id) ? editForm('Заметка к этапу', true) : (s.note ? html`<p class="stage-note">${s.note}</p>` : '')}
+                <div class="stage-actions">
+                  <button class="small-btn" data-stage-action="up" data-project-id="${p.id}" data-stage-id="${s.id}" ${i === 0 ? 'disabled' : ''} aria-label="Поднять этап «${s.name}»">↑</button>
+                  <button class="small-btn" data-stage-action="down" data-project-id="${p.id}" data-stage-id="${s.id}" ${i === p.list.length - 1 ? 'disabled' : ''} aria-label="Опустить этап «${s.name}»">↓</button>
+                  ${s.done ? '' : html`<button class="small-btn" data-stage-action="pick" data-project-id="${p.id}" data-stage-id="${s.id}" ${picked ? 'disabled' : ''}>${picked ? 'В плане' : 'На сегодня'}</button>`}
+                  <button class="small-btn" data-stage-action="toggle" data-project-id="${p.id}" data-stage-id="${s.id}">${s.done ? 'Вернуть в работу' : 'Этап готов'}</button>
+                  <button class="small-btn" data-stage-action="rename" data-project-id="${p.id}" data-stage-id="${s.id}">Переименовать</button>
+                  <button class="small-btn" data-stage-action="note" data-project-id="${p.id}" data-stage-id="${s.id}">Заметка</button>
+                  ${s.done ? '' : html`<button class="small-btn danger" data-stage-action="remove" data-project-id="${p.id}" data-stage-id="${s.id}">Удалить</button>`}
+                </div>
+              </li>`;
+          })}
+        </ol>
+        <form class="add-stage" data-add-stage="${p.id}">
+          <label class="sr-only" for="add-stage-${p.id}">Новый этап</label>
+          <input id="add-stage-${p.id}" name="name" maxlength="${NAME_MAX}" placeholder="Новый этап" value="${projUi.addStage[p.id] ?? ''}">
+          <button class="small-btn" type="submit">Добавить этап</button>
+        </form>
+        <div class="stage-actions">
+          <button class="small-btn" data-proj-action="copy" data-project-id="${p.id}">Создать похожую</button>
+          <button class="small-btn" data-proj-action="archive" data-project-id="${p.id}">В архив</button>
+        </div>
+      </section>`)}
+    ${archived.length ? html`
+      <details class="info" data-details="projects-archive" ${detailsAttr('projects-archive')}>
+        <summary>Архив (${archived.length})</summary>
+        <ul class="archive-list">
+          ${archived.map(p => html`<li><span>${p.name} · ${p.doneCount} из ${p.list.length}</span>
+            <button class="small-btn" data-proj-action="restore" data-project-id="${p.id}">Восстановить</button></li>`)}
+        </ul>
+      </details>` : ''}`);
+  if (ed) document.getElementById('edit-input')?.focus();
+}
+
+function newProjectPayload(name, stageNames) {
+  const names = stageNames.map(s => s.trim()).filter(Boolean).slice(0, 100);
+  const list = names.length ? names : ['Выполнить задачу'];
+  return {
+    op: 'project-create', projectId: crypto.randomUUID(), name: name.trim(),
+    stages: list.map((n, i) => ({ stageId: crypto.randomUUID(), name: n.slice(0, NAME_MAX), pos: i + 1 })),
+  };
+}
+
+async function projectAction(action, projectId, stageId) {
+  const proj = getProjects().get(projectId);
+  if (!proj) return;
+  const st = stageId ? proj.stages.get(stageId) : null;
+  const i = st ? proj.list.indexOf(st) : -1;
+  switch (action) {
+    case 'rename':
+      projUi.edit = st ? { kind: 'stage', projectId, stageId, value: st.name } : { kind: 'project', projectId, value: proj.name };
+      renderProjects();
+      return;
+    case 'note':
+      projUi.edit = { kind: 'note', projectId, stageId, value: st.note ?? '' };
+      renderProjects();
+      return;
+    case 'up':
+    case 'down': {
+      const other = proj.list[action === 'up' ? i - 1 : i + 1];
+      if (!other) return;
+      // Обмен позиций; при совпадении позиций назначаем различимые
+      const a = st.pos === other.pos ? other.pos + (action === 'up' ? -0.5 : 0.5) : other.pos;
+      await writePlanEvents([
+        { op: 'stage-set', projectId, stageId: st.id, field: 'pos', value: a },
+        { op: 'stage-set', projectId, stageId: other.id, field: 'pos', value: st.pos },
+      ]);
+      return;
+    }
+    case 'pick': await addPick({ kind: 'stage', projectId, stageId }); return;
+    case 'toggle': await setStageDone(projectId, stageId, !st.done); return;
+    case 'remove':
+      if (st.done) return; // завершённый этап: сначала вернуть в работу
+      if (!confirm(`Удалить этап «${st.name}»? Уже выполненные подходы останутся в истории.`)) return;
+      await writePlanEvent({ op: 'stage-remove', projectId, stageId }, 'Этап удалён');
+      return;
+    case 'copy': {
+      const payload = newProjectPayload(`${proj.name} (копия)`.slice(0, NAME_MAX), proj.list.map(s => s.name));
+      await writePlanEvent(payload, 'Создана похожая задача — без отметок выполнения');
+      return;
+    }
+    case 'archive':
+      if (!confirm(`Перенести «${proj.name}» в архив? История подходов сохранится, карточки этапов уйдут из плана.`)) return;
+      await writePlanEvent({ op: 'project-archive', projectId, archived: true }, 'Задача в архиве');
+      return;
+    case 'restore':
+      await writePlanEvent({ op: 'project-archive', projectId, archived: false }, 'Задача восстановлена');
+  }
+}
+
+const projectsBox = document.getElementById('projects-box');
+projectsBox.addEventListener('focusout', () => {
+  setTimeout(() => { if (projUi.pendingRender) renderProjects(); }, 0);
+});
+projectsBox.addEventListener('input', (e) => {
+  const f = e.target.form;
+  if (!f) return;
+  if (f.matches('[data-create-form]')) projUi.create[e.target.name] = e.target.value;
+  else if (f.matches('[data-edit-form]') && projUi.edit) projUi.edit.value = e.target.value;
+  else if (f.matches('[data-add-stage]')) projUi.addStage[f.dataset.addStage] = e.target.value;
+});
+projectsBox.addEventListener('change', (e) => {
+  if (e.target.name === 'template' && e.target.form?.matches('[data-create-form]')) {
+    const t = TASK_TEMPLATES.find(x => x.id === e.target.value);
+    projUi.create.template = e.target.value;
+    projUi.create.stages = t ? t.stages.join('\n') : '';
+    e.target.form.stages.value = projUi.create.stages;
+  }
+});
+projectsBox.addEventListener('click', (e) => {
+  if (e.target.closest('[data-create-open]')) {
+    projUi.create.open = true;
+    renderProjects();
+    projectsBox.querySelector('[data-create-form] [name=name]')?.focus();
+    return;
+  }
+  if (e.target.closest('[data-create-cancel]')) {
+    projUi.create = { open: false, name: '', template: '', stages: '' };
+    renderProjects();
+    return;
+  }
+  if (e.target.closest('[data-edit-cancel]')) {
+    projUi.edit = null;
+    renderProjects();
+    return;
+  }
+  const b = e.target.closest('[data-proj-action], [data-stage-action]');
+  if (b && !b.disabled) projectAction(b.dataset.projAction ?? b.dataset.stageAction, b.dataset.projectId, b.dataset.stageId);
+});
+projectsBox.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  if (f.matches('[data-create-form]')) {
+    const c = projUi.create;
+    if (!validName(c.name)) {
+      showMessage('Введите название задачи (до 200 символов)');
+      return;
+    }
+    const ok = await writePlanEvent(newProjectPayload(c.name, c.stages.split('\n')), `Задача создана: ${c.name.trim()}`);
+    if (ok) {
+      projUi.create = { open: false, name: '', template: '', stages: '' };
+      renderProjects();
+    }
+  } else if (f.matches('[data-edit-form]') && projUi.edit) {
+    const ed = projUi.edit;
+    const value = ed.kind === 'note' ? ed.value : ed.value.trim();
+    const payload = ed.kind === 'project'
+      ? { op: 'project-set', projectId: ed.projectId, field: 'name', value }
+      : { op: 'stage-set', projectId: ed.projectId, stageId: ed.stageId, field: ed.kind === 'note' ? 'note' : 'name', value };
+    document.activeElement?.blur();
+    const ok = await writePlanEvent(payload, 'Сохранено');
+    if (ok) {
+      projUi.edit = null;
+      renderProjects();
+    }
+  } else if (f.matches('[data-add-stage]')) {
+    const projectId = f.dataset.addStage;
+    const name = (projUi.addStage[projectId] ?? '').trim();
+    if (!name) return;
+    const proj = getProjects().get(projectId);
+    const pos = Math.max(0, ...[...proj.stages.values()].map(s => s.pos)) + 1;
+    document.activeElement?.blur();
+    const ok = await writePlanEvent({ op: 'stage-add', projectId, stageId: crypto.randomUUID(), name, pos }, `Этап добавлен${proj.complete ? ' — задача снова в работе' : ''}`);
+    if (ok) {
+      projUi.addStage[projectId] = '';
+      renderProjects();
+    }
+  }
+});
+
 // ===== Обработчики событий =====
 document.getElementById('quests').addEventListener('click', (e) => {
+  const pick = e.target.closest('[data-pick-quest]');
+  if (pick && !pick.disabled) {
+    addPick({ kind: 'quest', questId: pick.dataset.pickQuest });
+    return;
+  }
   const btn = e.target.closest('[data-quest]');
-  if (btn && !btn.disabled) completeQuest(btn.dataset.quest);
+  if (!btn || btn.disabled) return;
+  const id = btn.dataset.quest;
+  if (Date.now() - (questCooldown.get(id) ?? 0) < 1500) return; // двойной клик — одно выполнение
+  questCooldown.set(id, Date.now());
+  completeQuest(id);
 });
 
 document.getElementById('shop').addEventListener('click', (e) => {
@@ -2434,3 +3292,4 @@ window.addEventListener('online', sync);
 
 render();
 renderAuth();
+ensureActivation();

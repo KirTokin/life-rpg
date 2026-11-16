@@ -626,3 +626,51 @@ table.leisure-week { width: 100%; border-collapse: collapse; margin-top: 6px; fo
 .fold.collapsed .fold-body { display: none; }
 .fold + .fold { margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border); }
 .today-panel .care { margin-top: 12px; }
+
+/* ===== План, каталог, мои задачи ===== */
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.minimums { margin-bottom: 10px; }
+.min-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+.min-label { color: var(--muted); }
+.min-chip { padding: 3px 8px; border: 1px solid var(--border); border-radius: 12px; color: var(--muted); }
+.min-chip.planned { border-color: var(--gold); color: var(--gold); }
+.min-chip.ok { border-color: #4f7a42; background: #1f2a1c; color: #8fc77e; }
+.penalty-line { margin: 8px 0 0; padding: 6px 8px; border: 1px solid var(--ember); border-radius: 4px; color: var(--ember); font-size: 13px; }
+.dir-tag { display: inline-block; padding: 0 6px; border: 1px solid var(--border); border-radius: 10px; font-size: 11px; color: var(--gold); }
+.today-meta { margin: 0 0 8px; font-size: 13px; color: var(--muted); }
+.pick-remove { display: block; margin: 8px 0 0 auto; }
+.carry, .extra-done { margin: 0 0 12px; padding: 8px 10px; border: 1px dashed var(--border); border-radius: 6px; font-size: 13px; }
+.carry-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 2px 0; }
+.extra-done ul { margin: 4px 0 0; padding-left: 18px; }
+
+.quest.catalog-row { cursor: default; background: var(--panel-2); border: 1px solid var(--border); border-left: 3px solid var(--c, var(--gold)); border-radius: 4px; flex-wrap: wrap; }
+.catalog-actions { display: flex; gap: 6px; }
+.small-btn { min-height: 36px; padding: 6px 10px; font-size: 13px; }
+.small-btn.primary { border-color: var(--gold); color: var(--gold); }
+.small-btn.danger { border-color: var(--blood); color: #e08a7a; }
+.small-btn:disabled { opacity: 0.45; cursor: default; }
+.tasks-icon { display: inline-flex; align-items: center; justify-content: center; font-size: 22px; color: var(--gold); }
+
+.projects { display: flex; flex-direction: column; gap: 12px; }
+.project, .project-create { padding: 12px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
+.project.complete { border-color: #4f7a42; }
+.project-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.project-head h4 { flex: 1; margin: 0; font-size: 17px; color: var(--text); overflow-wrap: anywhere; }
+.project-create { display: flex; flex-direction: column; gap: 10px; }
+.project-create label, .inline-edit { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); }
+.inline-edit { flex: 1; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
+.project input, .project textarea, .project-create input, .project-create textarea, .project-create select {
+  min-height: 40px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg); color: var(--text); font-family: inherit; font-size: 16px; max-width: 100%;
+}
+.inline-edit input, .inline-edit textarea { flex: 1 1 200px; }
+.stages { margin: 8px 0; padding-left: 22px; }
+.stage { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.stage-name { overflow-wrap: anywhere; }
+.stage.done .stage-name { color: #8fc77e; }
+.stage-note { margin: 4px 0; font-size: 13px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.stage-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.add-stage { display: flex; gap: 6px; flex-wrap: wrap; }
+.add-stage input { flex: 1 1 160px; }
+.archive-list { list-style: none; padding: 0; }
+.archive-list li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 4px 0; }
