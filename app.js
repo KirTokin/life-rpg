@@ -1353,6 +1353,7 @@ function render() {
   updatePendingBadge();
   updateBackupHint();
   updateConfigWarning();
+  applyFolds();
 }
 
 let messageTimer;
@@ -1492,7 +1493,7 @@ db.auth.onAuthStateChange((event, session) => {
 const UI_KEY = 'life-rpg-ui';
 const UI_VERSION = 2; // v2: появился экран «Сегодня», он открывается первым
 const SCREENS = ['today', 'hero', 'quests', 'shop', 'achievements'];
-const ui = { v: UI_VERSION, screen: 'today', right: 'shop', questStat: STATS[0].id };
+const ui = { v: UI_VERSION, screen: 'today', right: 'shop', questStat: STATS[0].id, folds: {} };
 try {
   const stored = JSON.parse(localStorage.getItem(UI_KEY)) || {};
   if (stored.v === UI_VERSION) Object.assign(ui, stored);
@@ -1501,6 +1502,20 @@ try {
   // хранилище недоступно — используем значения по умолчанию
 }
 if (!SCREENS.includes(ui.screen)) ui.screen = 'today';
+if (!ui.folds || typeof ui.folds !== 'object') ui.folds = {};
+
+// Сворачиваемые подблоки «Сегодня»: шапка видна всегда, тело скрывается. По умолчанию раскрыты.
+function isFoldOpen(id) {
+  return ui.folds[id] !== false;
+}
+
+function applyFolds() {
+  document.querySelectorAll('[data-fold-section]').forEach(section => {
+    const open = isFoldOpen(section.dataset.foldSection);
+    section.classList.toggle('collapsed', !open);
+    section.querySelectorAll('[data-fold]').forEach(b => b.setAttribute('aria-expanded', open ? 'true' : 'false'));
+  });
+}
 if (!STATS.some(s => s.id === ui.questStat)) ui.questStat = STATS[0].id;
 
 function saveUi() {
@@ -1525,6 +1540,15 @@ function applyUi() {
 
 document.addEventListener('click', (e) => {
   // Меню экранов (телефон)
+  const foldBtn = e.target.closest('[data-fold]');
+  if (foldBtn) {
+    const id = foldBtn.dataset.fold;
+    ui.folds[id] = !isFoldOpen(id);
+    saveUi();
+    applyFolds();
+    return;
+  }
+
   const screenBtn = e.target.closest('[data-go-screen]');
   if (screenBtn) {
     ui.screen = screenBtn.dataset.goScreen;
@@ -1651,10 +1675,12 @@ function renderCare(health, view) {
   const next = view.achievements.find(a => a.condition.type === 'careDays' && !a.unlocked);
   const hour = String(HEALTH.dayStartHour).padStart(2, '0');
   setHtml('care', html`
-    <div class="care-head">
-      <h3>Уход · ${health.doneToday}/${CARE_TASKS.length}</h3>
-      <span class="today-count">♥ ${health.hp}/${HEALTH.max}</span>
-    </div>
+    <h3 class="fold-title"><button class="fold-head" data-fold="care" aria-expanded="true" aria-controls="fold-body-care">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-name">Уход · ${health.doneToday}/${CARE_TASKS.length}</span>
+        <span class="fold-sum">♥ ${health.hp}/${HEALTH.max}</span>
+      </button></h3>
+    <div class="fold-body" id="fold-body-care">
     <p class="today-note care-rule">
       Полных дней: ${view.careFullDays}${next ? ` · до «${next.name}»: ${next.current} из ${next.target}` : ' · все рубежи пройдены'}
     </p>
@@ -1688,7 +1714,8 @@ function renderCare(health, view) {
         <li>Ниже ${HEALTH.shopLockBelow} здоровья магазин закрыт; золото и полученные награды сохраняются.</li>
         <li>${health.started ? (health.lastPenalty ? `Вчера здоровье снизилось на ${health.lastPenalty}.` : 'Вчера снижения не было.') : `Здоровье считается с ${startLabel}.`}</li>
       </ul>
-    </details>`);
+    </details>
+    </div>`);
 }
 
 const PART_DONE = { morning: 'Утро завершено', day: 'День завершён', evening: 'Вечер завершён' };
@@ -1951,10 +1978,12 @@ function renderLeisure(view, health) {
     .sort((a, b) => b.ts - a.ts).slice(0, 10);
 
   setHtml('leisure', html`
-    <div class="care-head">
-      <h3>Развлечения</h3>
-      <span class="today-count">Доступно сегодня: ${fmtMinutes(lv.available)}</span>
-    </div>
+    <h3 class="fold-title"><button class="fold-head" data-fold="leisure" aria-expanded="true" aria-controls="fold-body-leisure">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-name">Развлечения</span>
+        <span class="fold-sum">Доступно сегодня: ${fmtMinutes(lv.available)}</span>
+      </button></h3>
+    <div class="fold-body" id="fold-body-leisure">
     <p class="today-note care-rule">
       Отмечено сегодня: ${fmtMinutes(lv.today.minutes)}${lv.debt ? html` · <span class="debt">Долг к погашению: ${lv.debt} мин</span>` : ''}
     </p>
@@ -1968,7 +1997,8 @@ function renderLeisure(view, health) {
         ${health.hp < HEALTH.shopLockBelow ? html`<p class="shop-locked">Здоровье ${health.hp}: новые покупки закрыты до ${HEALTH.shopLockBelow}. Купленные минуты и переходный запас можно тратить.</p>` : ''}
         <p class="today-note">Золото: ${view.gold} · 1 монета = 3 мин · в запасе не больше ${LEISURE.maxBalance} мин</p>
         ${REWARDS.filter(r => r.minutes && !r.retired).map(r => rewardButton(r, view, health))}
-      </div>` : ''}`);
+      </div>` : ''}
+    </div>`);
 
   setHtml('leisure-details', html`
     <details class="info" data-details="leisure-source" ${detailsAttr('leisure-source')}>
@@ -2295,11 +2325,14 @@ function renderToday() {
   const activeQuest = draft ? QUESTS.find(q => q.id === draft.questId) : null;
   todayDateShown = dateKey(Date.now());
 
+  document.getElementById('today-date').textContent = dateLabel;
   setHtml('today', html`
-    <div class="today-head">
-      <span class="today-date">${dateLabel}</span>
-      <span class="today-count">Выполнено: ${doneCount} из ${cards.length}</span>
-    </div>
+    <h3 class="fold-title"><button class="fold-head" data-fold="tasks" aria-expanded="true" aria-controls="fold-body-tasks">
+        <span class="fold-arrow" aria-hidden="true"></span>
+        <span class="fold-name">Задачи дня</span>
+        <span class="fold-sum">Выполнено: ${doneCount} из ${cards.length}</span>
+      </button></h3>
+    <div class="fold-body" id="fold-body-tasks">
     ${cards.map(q => {
       const stat = STATS.find(s => s.id === q.stat);
       const gold = Math.round(q.xp * BALANCE.goldPerXp);
@@ -2338,7 +2371,8 @@ function renderToday() {
             ${blocked ? html`<p class="today-note">Сначала заверши или отложи «${activeQuest.name}».</p>` : ''}
           `}
         </article>`;
-    })}`);
+    })}
+    </div>`);
 }
 
 document.getElementById('today').addEventListener('click', (e) => {

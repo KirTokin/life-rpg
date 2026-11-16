@@ -48,13 +48,13 @@
     <!-- Центр / экран «Квесты» -->
     <div class="col col-center">
       <section class="panel today-panel" aria-labelledby="today-title">
-        <h2 id="today-title">Сегодня</h2>
-        <div id="today"></div>
-        <div id="care" class="care"></div>
-        <div id="leisure-wrap" class="care leisure">
+        <h2 id="today-title">Сегодня <span id="today-date" class="today-date"></span></h2>
+        <div class="fold" data-fold-section="tasks"><div id="today"></div></div>
+        <div id="care" class="fold care" data-fold-section="care"></div>
+        <div id="leisure-wrap" class="fold care leisure" data-fold-section="leisure">
           <div id="leisure"></div>
-          <div id="leisure-form-box"></div>
-          <div id="leisure-details"></div>
+          <div id="leisure-form-box" class="fold-body"></div>
+          <div id="leisure-details" class="fold-body"></div>
         </div>
       </section>
 
