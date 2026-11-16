@@ -407,6 +407,10 @@ function evaluateCondition(cond, view) {
       target = cond.days;
       break;
     }
+    case 'careDays':
+      current = view.careFullDays;
+      target = cond.count;
+      break;
     case 'purchaseCount':
       current = view.purchases.length;
       target = cond.count;
@@ -415,6 +419,20 @@ function evaluateCondition(cond, view) {
       console.error('Неизвестный тип условия ачивки:', cond.type);
   }
   return { current: Math.min(current, target), target, unlocked: target > 0 && current >= target };
+}
+
+// Дни ухода (с HEALTH.startDate), в которые выполнены все дела. Повторы одного дела не считаются.
+function fullCareDays(log) {
+  const known = new Set(CARE_TASKS.map(t => t.id));
+  const byDay = new Map();
+  for (const e of log) {
+    if (!isActive(e) || entryType(e) !== 'care' || !known.has(e.taskId)) continue;
+    const day = careDayKey(e.ts);
+    if (day < HEALTH.startDate) continue;
+    if (!byDay.has(day)) byDay.set(day, new Set());
+    byDay.get(day).add(e.taskId);
+  }
+  return [...byDay].filter(([, set]) => set.size === known.size).map(([day]) => day).sort();
 }
 
 function computeState(log) {
@@ -466,7 +484,10 @@ function computeState(log) {
   // Довести состояние до текущей версии баланса, даже если после её начала ещё не было записей
   if (vIndex !== BALANCE_HISTORY.length - 1) switchBalance(BALANCE_HISTORY.length - 1);
 
-  const view = { hero, stats, totalXp, quests, purchases };
+  const careDays = fullCareDays(log);
+  gold += careDays.length * HEALTH.fullDayGold;
+
+  const view = { hero, stats, totalXp, quests, purchases, careFullDays: careDays.length, careDaysList: careDays };
   view.achievements = ACHIEVEMENTS.map(a => {
     const result = evaluateCondition(a.condition, view);
     const claim = claims.get(a.id);
@@ -727,7 +748,7 @@ async function fetchAllRows() {
   let from = 0;
   while (true) {
     const { data, error } = await db.from('log_entries')
-      .select('id, type, quest_id, stat, xp, gold, reward_id, cost, achievement_id, care_id, ts, deleted')
+      .select('*') // все колонки, какие есть: игра не ломается, если миграция БД ещё не выполнена
       .order('ts', { ascending: true })
       .order('id', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -740,6 +761,27 @@ async function fetchAllRows() {
 
 let syncing = false;
 let syncAgain = false;
+let syncBlocked = 0; // записи, которые база отклонила (например, миграция БД ещё не выполнена)
+
+// Отправляет записи пачкой. Если база отклонила пачку (неизвестный тип записи или колонка),
+// отправляет по одной: принятые синхронизируются, отклонённые остаются на устройстве.
+// Возвращает Set id отклонённых записей. Ошибка сети — исключение.
+async function pushRows(entries) {
+  const rows = entries.map(toRow);
+  const { error } = await db.from('log_entries').upsert(rows, { onConflict: 'id', ignoreDuplicates: true });
+  if (!error) return new Set();
+  if (!error.code) throw error; // сеть или иная ошибка без кода базы
+  console.warn('База отклонила пачку записей, отправляю по одной:', error.message);
+  const rejected = new Set();
+  for (const row of rows) {
+    const { error: rowError } = await db.from('log_entries').upsert([row], { onConflict: 'id', ignoreDuplicates: true });
+    if (!rowError) continue;
+    if (!rowError.code) throw rowError;
+    console.warn('Запись не принята базой:', row.type, row.id, rowError.message);
+    rejected.add(row.id);
+  }
+  return rejected;
+}
 
 async function sync() {
   if (!currentUser || save.ownerId !== currentUser.id) return;
@@ -757,11 +799,10 @@ async function sync() {
       // Запоминаем, что именно отправили (защита от гонки, см. разбор)
       const sentDeleted = new Map(pending.map(e => [e.id, !!e.deleted]));
 
-      const { error: insertError } = await db.from('log_entries')
-        .upsert(pending.map(toRow), { onConflict: 'id', ignoreDuplicates: true });
-      if (insertError) throw insertError;
+      const rejected = await pushRows(pending);
+      syncBlocked = rejected.size;
 
-      const deletedIds = pending.filter(e => e.deleted).map(e => e.id);
+      const deletedIds = pending.filter(e => e.deleted && !rejected.has(e.id)).map(e => e.id);
       if (deletedIds.length) {
         const { error: updateError } = await db.from('log_entries')
           .update({ deleted: true })
@@ -770,7 +811,7 @@ async function sync() {
       }
 
       pending.forEach(e => {
-        if (!!e.deleted === sentDeleted.get(e.id)) e.synced = true;
+        if (!rejected.has(e.id) && !!e.deleted === sentDeleted.get(e.id)) e.synced = true;
       });
       storage.save(save);
     }
@@ -785,7 +826,9 @@ async function sync() {
       showMessage(`После синхронизации отменено записей сверх лимита: ${cancelled}`);
       syncAgain = true; // отправить отмены в облако
     }
-    setSyncStatus(`✅ ${new Date().toLocaleTimeString().slice(0, 5)}`);
+    setSyncStatus(syncBlocked
+      ? `⚠️ база не принимает записей: ${syncBlocked} — нужна SQL-миграция, данные сохранены на устройстве`
+      : `✅ ${new Date().toLocaleTimeString().slice(0, 5)}`);
   } catch (e) {
     console.error('Ошибка синхронизации:', e);
     setSyncStatus('⚠️ офлайн, данные сохранены локально');
@@ -1272,7 +1315,7 @@ function render() {
     })}`);
   document.querySelectorAll('.ach-badge').forEach(el => { el.textContent = view.readyCount || ''; });
   renderToday();
-  renderCare(health);
+  renderCare(health, view);
   updatePendingBadge();
   updateBackupHint();
   updateConfigWarning();
@@ -1551,36 +1594,85 @@ function renderHealthBar(health) {
 let careDayShown = careDayKey(Date.now());
 let careBusy = false;
 
-function renderCare(health) {
+// Состояние раскрытых блоков <details>: переживает перерисовку
+const openDetails = new Set();
+document.addEventListener('toggle', (e) => {
+  const id = e.target?.dataset?.details;
+  if (!id) return;
+  if (e.target.open) openDetails.add(id);
+  else openDetails.delete(id);
+}, true);
+function detailsAttr(id) {
+  return openDetails.has(id) ? 'open' : '';
+}
+
+function partProgress(part) {
+  const tasks = CARE_TASKS.filter(t => t.part === part);
+  return { done: tasks.filter(t => careDoneToday(t.id)).length, total: tasks.length };
+}
+
+function renderCare(health, view) {
   careDayShown = careDayKey(Date.now());
   const startLabel = new Date(HEALTH.startDate + 'T12:00:00').toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+  const next = view.achievements.find(a => a.condition.type === 'careDays' && !a.unlocked);
+  const hour = String(HEALTH.dayStartHour).padStart(2, '0');
   setHtml('care', html`
     <div class="care-head">
-      <h3>Уход за собой</h3>
-      <span class="today-count">${health.doneToday} из ${CARE_TASKS.length}</span>
+      <h3>Уход · ${health.doneToday}/${CARE_TASKS.length}</h3>
+      <span class="today-count">♥ ${health.hp}/${HEALTH.max}</span>
     </div>
     <p class="today-note care-rule">
-      Каждое дело: +${HEALTH.restorePerTask} к здоровью. В ${String(HEALTH.dayStartHour).padStart(2, '0')}:00 за невыполненные вчера дела здоровье снижается.
-      ${health.started ? (health.lastPenalty ? ` Вчера: −${health.lastPenalty}.` : '') : ` Здоровье считается с ${startLabel}.`}
+      Полных дней: ${view.careFullDays}${next ? ` · до «${next.name}»: ${next.current} из ${next.target}` : ' · все рубежи пройдены'}
     </p>
-    ${health.hp < HEALTH.shopLockBelow ? html`<p class="shop-locked">Здоровье ${health.hp}: магазин закрыт до ${HEALTH.shopLockBelow}.</p>` : ''}
+    ${health.hp < HEALTH.shopLockBelow ? html`<p class="shop-locked">Здоровье ${health.hp}: магазин закрыт до ${HEALTH.shopLockBelow}. Заработанное золото сохраняется.</p>` : ''}
     ${Object.entries(CARE_PARTS).map(([part, label]) => {
       const tasks = CARE_TASKS.filter(t => t.part === part);
       if (!tasks.length) return '';
+      const p = partProgress(part);
       return html`
         <div class="care-part">
-          <div class="care-part-name">${label}</div>
+          <div class="care-part-name">${label} · ${p.done}/${p.total}${p.done === p.total ? ' ✓' : ''}</div>
           ${tasks.map(t => {
             const done = Boolean(careDoneToday(t.id));
+            const badge = done ? (health.hp < HEALTH.max ? `+${HEALTH.restorePerTask} ♥` : '') : `−${t.penalty}`;
             return html`
               <button class="care-task ${done ? 'done' : ''}" data-care="${t.id}" aria-pressed="${done ? 'true' : 'false'}" ${careBusy ? 'disabled' : ''}>
                 <span class="care-check" aria-hidden="true">${done ? '✓' : ''}</span>
                 <span class="care-name">${t.name}</span>
-                <span class="care-penalty">${done ? `+${HEALTH.restorePerTask}` : `−${t.penalty}`}</span>
+                <span class="care-penalty">${badge}</span>
               </button>`;
           })}
         </div>`;
-    })}`);
+    })}
+    <details class="info" data-details="care-rules" ${detailsAttr('care-rules')}>
+      <summary>Как считается</summary>
+      <ul>
+        <li>Каждое отмеченное дело: +${HEALTH.restorePerTask} к здоровью, максимум ${HEALTH.max}.</li>
+        <li>День ухода длится с ${hour}:00 до ${hour}:00. В ${hour}:00 за каждое невыполненное вчера дело здоровье снижается на число рядом с делом.</li>
+        <li>Все ${CARE_TASKS.length} дел за день: +${HEALTH.fullDayGold} монет, при любом здоровье.</li>
+        <li>Достижения ухода считают полные дни накопительно: пропуск не отнимает прежние дни.</li>
+        <li>Ниже ${HEALTH.shopLockBelow} здоровья магазин закрыт; золото и полученные награды сохраняются.</li>
+        <li>${health.started ? (health.lastPenalty ? `Вчера здоровье снизилось на ${health.lastPenalty}.` : 'Вчера снижения не было.') : `Здоровье считается с ${startLabel}.`}</li>
+      </ul>
+    </details>`);
+}
+
+const PART_DONE = { morning: 'Утро завершено', day: 'День завершён', evening: 'Вечер завершён' };
+
+// Короткая обратная связь после отметки: дело, группа, полный день, доступное достижение
+function careFeedback(task, before, after) {
+  const p = partProgress(task.part);
+  const label = CARE_PARTS[task.part];
+  const parts = [task.doneMsg ?? `✓ ${task.name}`];
+  parts.push(p.done === p.total ? `${PART_DONE[task.part] ?? label + ' завершено'} · ${p.done}/${p.total}` : `${label}: ${p.done}/${p.total}`);
+  if (after.careFullDays > before.careFullDays) {
+    parts.push(`Вся база дня выполнена. +${HEALTH.fullDayGold} монет`);
+  }
+  after.achievements.forEach((a, i) => {
+    if (!a.unlocked || before.achievements[i].unlocked) return;
+    parts.push(a.claimed ? `«${a.name}» снова засчитано (+${a.claimGold})` : `Доступна награда: «${a.name}»`);
+  });
+  return parts.join(' · ');
 }
 
 // Отметить или снять отметку дела за текущий день здоровья
@@ -1590,6 +1682,7 @@ async function toggleCare(taskId) {
   if (!task) return;
   careBusy = true;
   absorbDisk();
+  const before = getState();
   const existing = careDoneToday(taskId);
   let ok;
   if (existing) {
@@ -1619,7 +1712,7 @@ async function toggleCare(taskId) {
     showMessage('⚠️ Не удалось сохранить отметку на устройстве. Попробуйте ещё раз.');
     return;
   }
-  showMessage(existing ? `Отметка снята: ${task.name}` : `✓ ${task.name}`);
+  showMessage(existing ? `Отметка снята: ${task.name}` : careFeedback(task, before, getState()));
   sync();
 }
 

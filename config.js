@@ -85,19 +85,22 @@ const HEALTH = {
   dayStartHour: 4,
   startDate: '2026-11-16',
   shopLockBelow: 30,
+  // Полный день ухода — все дела одного дня (04:00–04:00). Бонус начисляется один раз за день,
+  // при любом здоровье. Считается из журнала, отдельной записи нет.
+  fullDayGold: 5,
 };
 
 // part: morning — утро, day — день, evening — вечер. id не менять: по ним считается история.
 const CARE_TASKS = [
-  { id: 'teeth-am',  part: 'morning', name: 'Почистить зубы',             penalty: 4 },
-  { id: 'exercise',  part: 'morning', name: 'Зарядка 5–10 минут',         penalty: 3 },
-  { id: 'breakfast', part: 'morning', name: 'Завтрак',                    penalty: 3 },
-  { id: 'lunch',     part: 'day',     name: 'Обед',                       penalty: 3 },
-  { id: 'water',     part: 'day',     name: 'Пить воду в течение дня',    penalty: 2 },
-  { id: 'outside',   part: 'day',     name: 'Выйти на улицу, 15+ минут',  penalty: 2 },
-  { id: 'dinner',    part: 'evening', name: 'Ужин',                       penalty: 3 },
-  { id: 'shower',    part: 'evening', name: 'Душ',                        penalty: 4 },
-  { id: 'teeth-pm',  part: 'evening', name: 'Почистить зубы',             penalty: 4 },
+  { id: 'teeth-am',  part: 'morning', name: 'Почистить зубы утром',        penalty: 4, doneMsg: 'Зубы почищены' },
+  { id: 'exercise',  part: 'morning', name: 'Сделать зарядку — 5–10 минут', penalty: 3, doneMsg: 'Зарядка сделана' },
+  { id: 'breakfast', part: 'morning', name: 'Позавтракать',                penalty: 3, doneMsg: 'Завтрак отмечен' },
+  { id: 'lunch',     part: 'day',     name: 'Пообедать',                   penalty: 3, doneMsg: 'Обед отмечен' },
+  { id: 'water',     part: 'day',     name: 'Пить воду в течение дня',     penalty: 2, doneMsg: 'Вода отмечена' },
+  { id: 'outside',   part: 'day',     name: 'Побыть на улице не меньше 15 минут', penalty: 2, doneMsg: 'Прогулка отмечена' },
+  { id: 'dinner',    part: 'evening', name: 'Поужинать',                   penalty: 3, doneMsg: 'Ужин отмечен' },
+  { id: 'shower',    part: 'evening', name: 'Принять душ',                 penalty: 4, doneMsg: 'Душ принят' },
+  { id: 'teeth-pm',  part: 'evening', name: 'Почистить зубы перед сном',   penalty: 4, doneMsg: 'Зубы почищены' },
 ];
 
 const CARE_PARTS = { morning: 'Утро', day: 'День', evening: 'Вечер' };
@@ -113,7 +116,7 @@ const REWARDS = [
 ];
 
 // ===== Конфиг: ачивки =====
-// Типы условий: anyQuestCount, questCount, heroLevel, allStatsLevel, streak, purchaseCount
+// Типы условий: anyQuestCount, questCount, heroLevel, allStatsLevel, streak, purchaseCount, careDays
 const ACHIEVEMENTS = [
   { id: 'first-quest', icon: '👣', name: 'Первый шаг',          desc: 'Выполнить любой квест',               gold: 20,  condition: { type: 'anyQuestCount', count: 1 } },
   { id: 'quests-100',  icon: '💯', name: 'Сотня',               desc: 'Выполнить 100 квестов',               gold: 200, condition: { type: 'anyQuestCount', count: 100 } },
@@ -126,6 +129,12 @@ const ACHIEVEMENTS = [
   { id: 'hero-10',     icon: '🌟', name: 'Ветеран',             desc: 'Герой 10 уровня',                     gold: 300, condition: { type: 'heroLevel', level: 10 } },
   { id: 'all-stats-5', icon: '⚖️', name: 'Разносторонний',      desc: 'Все характеристики 5 уровня',         gold: 300, condition: { type: 'allStatsLevel', level: 5 } },
   { id: 'first-buy',   icon: '🎁', name: 'Заслужил',            desc: 'Купить первую награду',               gold: 10,  condition: { type: 'purchaseCount', count: 1 } },
+  // Уход: полные дни считаются накопительно, непрерывная серия не нужна
+  { id: 'care-days-1',  icon: '🌱', name: 'Первый день заботы', desc: '1 полный день ухода',  gold: 10, condition: { type: 'careDays', count: 1 } },
+  { id: 'care-days-3',  icon: '🌿', name: '3 дня заботы',       desc: '3 полных дня ухода',   gold: 15, condition: { type: 'careDays', count: 3 } },
+  { id: 'care-days-7',  icon: '🍀', name: '7 дней заботы',      desc: '7 полных дней ухода',  gold: 25, condition: { type: 'careDays', count: 7 } },
+  { id: 'care-days-14', icon: '🌳', name: '14 дней заботы',     desc: '14 полных дней ухода', gold: 40, condition: { type: 'careDays', count: 14 } },
+  { id: 'care-days-30', icon: '🏵️', name: '30 дней заботы',     desc: '30 полных дней ухода', gold: 60, condition: { type: 'careDays', count: 30 } },
 ];
 
 // ===== Баланс: история версий =====

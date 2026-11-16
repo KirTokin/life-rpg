@@ -491,6 +491,11 @@ button:hover:not(:disabled) { border-color: var(--gold); }
   font-size: 13px;
 }
 
+/* ===== Раскрываемые пояснения ===== */
+details.info { margin-top: 8px; font-size: 13px; color: var(--muted); }
+details.info summary { cursor: pointer; color: var(--gold); padding: 6px 0; min-height: 32px; }
+details.info ul { margin: 4px 0 0; padding-left: 18px; line-height: 1.5; }
+
 /* Видимый фокус при работе с клавиатуры */
 button:focus-visible,
 .today-card:focus-visible {
